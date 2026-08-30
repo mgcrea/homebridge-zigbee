@@ -1,0 +1,128 @@
+{
+  "pluginAlias": "Zigbee",
+  "pluginType": "platform",
+  "singular": true,
+  "headerDisplay": "Drives a Zigbee coordinator directly and exposes the lights and outlets paired to it in HomeKit.\n\nThere is no vendor bridge and no second daemon: this plugin owns the radio itself. Nothing else may hold the same coordinator open at the same time — zigbee2mqtt, ZHA and this plugin cannot share one.",
+  "footerDisplay": "**Pairing.** Turn on the *Zigbee Pairing* switch in the Home app, then put the device into pairing mode. The switch turns itself off when the window closes.\n\n**Hue bulbs already on a Hue bridge must be factory reset first.** Remove the bulb in the Hue app, or power-cycle it five times. This plugin's Zigbee stack does not implement Touchlink, so there is no over-the-air way to take a bulb off its old bridge.\n\n**Your network key is generated once and stored outside this file**, in `zigbee/identity.json` under Homebridge's storage directory. Back that directory up: losing it means forming a new network and pairing every device again.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Name",
+        "type": "string",
+        "default": "Zigbee",
+        "description": "The name shown in the Homebridge log for this platform."
+      },
+      "port": {
+        "title": "Coordinator Port",
+        "type": "string",
+        "required": true,
+        "placeholder": "/dev/serial/by-id/usb-Nabu_Casa_ZBT-2_XXXXXXXX-if00",
+        "description": "Path to your coordinator. Use the stable /dev/serial/by-id/ path rather than /dev/ttyACM0, which renumbers across reboots and after any USB hiccup."
+      },
+      "adapter": {
+        "title": "Adapter",
+        "type": "string",
+        "default": "zoh",
+        "oneOf": [
+          { "title": "zoh — OpenThread RCP firmware (Zigbee on Host)", "enum": ["zoh"] },
+          { "title": "ember — EmberZNet NCP firmware (Silicon Labs)", "enum": ["ember"] },
+          { "title": "zstack — Texas Instruments Z-Stack", "enum": ["zstack"] },
+          { "title": "deconz — dresden elektronik ConBee", "enum": ["deconz"] },
+          { "title": "zboss", "enum": ["zboss"] },
+          { "title": "zigate", "enum": ["zigate"] }
+        ],
+        "description": "Must match the firmware actually on your stick, not the model of stick. A ZBT-2 ships with OpenThread RCP firmware, which is 'zoh'; the same hardware flashed with the Zigbee NCP image is 'ember'."
+      },
+      "baudRate": {
+        "title": "Baud Rate",
+        "type": "integer",
+        "default": 460800,
+        "description": "460800 for a ZBT-2. Only change this if your coordinator's firmware was built for a different rate."
+      },
+      "rtscts": {
+        "title": "Hardware Flow Control",
+        "type": "boolean",
+        "default": true,
+        "description": "On for firmware built with hardware flow control, which is the usual case for a ZBT-2."
+      },
+      "channel": {
+        "title": "Channel",
+        "type": "integer",
+        "default": 15,
+        "minimum": 11,
+        "maximum": 26,
+        "description": "The 802.15.4 channel to form the network on. Zigbee shares the 2.4GHz band with Wi-Fi: channels 15, 20 and 25 sit in the gaps between Wi-Fi 1, 6 and 11. Changing this after devices are paired will strand them."
+      },
+      "exposePairingSwitch": {
+        "title": "Show the Pairing Switch",
+        "type": "boolean",
+        "default": true,
+        "description": "Adds a switch to the Home app that opens the network to new devices. Turn this off if you would rather pair from the command line with `pnpm pair`."
+      },
+      "permitJoinDuration": {
+        "title": "Pairing Window (seconds)",
+        "type": "integer",
+        "default": 120,
+        "minimum": 30,
+        "maximum": 254,
+        "description": "How long the network stays open after the pairing switch is turned on. Capped at 254 by the Zigbee specification."
+      },
+      "refreshInterval": {
+        "title": "Refresh Interval (seconds)",
+        "type": "integer",
+        "default": 300,
+        "minimum": 30,
+        "maximum": 3600,
+        "description": "How often mains-powered devices are re-read. This is only a safety net for lights that refused to report changes on their own; battery devices are never polled."
+      },
+      "transitionTime": {
+        "title": "Transition Time (seconds)",
+        "type": "number",
+        "default": 0.4,
+        "minimum": 0,
+        "maximum": 10,
+        "description": "How long a light takes to fade to a new brightness or colour. Zero snaps instantly."
+      },
+      "allowNetworkReset": {
+        "title": "Allow Network Reset",
+        "type": "boolean",
+        "default": false,
+        "description": "Leave this off. When the coordinator forms a NEW network while devices were still paired to the old one, the plugin refuses to start rather than filling HomeKit with tiles backed by nothing. Turning this on lets it proceed anyway — every device would then need to be paired again."
+      },
+      "debug": {
+        "title": "Debug Logging",
+        "type": "boolean",
+        "default": false,
+        "description": "Logs every Zigbee frame in both directions. Very noisy; useful when a specific device misbehaves."
+      },
+      "devices": {
+        "title": "Per-device Settings",
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "ieee": {
+              "title": "IEEE Address",
+              "type": "string",
+              "required": true,
+              "placeholder": "0x0017880102030405",
+              "description": "The device's address, as shown by `pnpm diagnose`. Matched case-insensitively, with or without the 0x."
+            },
+            "name": {
+              "title": "Name",
+              "type": "string",
+              "description": "Overrides the name used when the accessory is first added. Renaming in the Home app afterwards always wins."
+            },
+            "exclude": {
+              "title": "Exclude",
+              "type": "boolean",
+              "default": false,
+              "description": "Keep this device out of HomeKit entirely."
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+*.log
+
+.idea/
+
+# Local probe settings
+.env
+.env.local
+
+# Local Homebridge instance for development — persist/ holds the paired HomeKit keys.
+.homebridge/
+
+# Zigbee network state written by scripts/diagnose.ts and scripts/pair.ts.
+# zoh.save and identity.json hold the network key: never commit them.
+.zigbee/

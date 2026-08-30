@@ -1,0 +1,94 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { COALESCE_WINDOW_MS, DeviceQueue } from "#model/queue";
+
+beforeEach(() => {
+  vi.useFakeTimers();
+});
+
+describe("DeviceQueue", () => {
+  it("runs tasks one at a time, in order", async () => {
+    const queue = new DeviceQueue();
+    const order: number[] = [];
+
+    const slow = async (id: number, ms: number): Promise<void> => {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      order.push(id);
+    };
+
+    const all = Promise.all([
+      queue.run(async () => await slow(1, 30)),
+      queue.run(async () => await slow(2, 5)),
+      queue.run(async () => await slow(3, 1)),
+    ]);
+    await vi.advanceTimersByTimeAsync(100);
+    await all;
+
+    // Zigbee end devices drop overlapping requests, so ordering is the point.
+    expect(order).toEqual([1, 2, 3]);
+  });
+
+  it("keeps running after a task rejects", async () => {
+    const queue = new DeviceQueue();
+    const after = vi.fn<() => void>();
+
+    const failed = queue.run(async () => {
+      await Promise.resolve();
+      throw new Error("device did not respond");
+    });
+    await expect(failed).rejects.toThrow("device did not respond");
+
+    // One failed write must not wedge every later command for this device.
+    await queue.run(async () => {
+      after();
+      await Promise.resolve();
+    });
+    expect(after).toHaveBeenCalled();
+  });
+
+  it("keeps only the newest task under a key", async () => {
+    const queue = new DeviceQueue();
+    const ran: number[] = [];
+
+    for (const value of [1, 2, 3]) {
+      queue.coalesce("apply", async () => {
+        ran.push(value);
+        await Promise.resolve();
+      });
+    }
+
+    await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS + 5);
+    expect(ran).toEqual([3]);
+  });
+
+  it("keeps different keys independent", async () => {
+    const queue = new DeviceQueue();
+    const ran: string[] = [];
+
+    queue.coalesce("a", async () => {
+      ran.push("a");
+      await Promise.resolve();
+    });
+    queue.coalesce("b", async () => {
+      ran.push("b");
+      await Promise.resolve();
+    });
+
+    await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS + 5);
+    expect(ran.toSorted()).toEqual(["a", "b"]);
+  });
+
+  it("drops pending work on disposal", async () => {
+    const queue = new DeviceQueue();
+    const ran = vi.fn<() => void>();
+
+    queue.coalesce("apply", async () => {
+      ran();
+      await Promise.resolve();
+    });
+    queue.dispose();
+
+    await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS + 5);
+    expect(ran).not.toHaveBeenCalled();
+  });
+});

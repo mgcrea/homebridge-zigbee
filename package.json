@@ -1,0 +1,79 @@
+{
+  "name": "@mgcrea/homebridge-zigbee",
+  "displayName": "Zigbee",
+  "version": "0.1.0",
+  "description": "Homebridge plugin that drives a Zigbee coordinator directly, exposing lights and outlets in HomeKit without a vendor bridge",
+  "author": "Olivier Louvignes <olivier@mgcrea.io>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mgcrea/homebridge-zigbee.git"
+  },
+  "homepage": "https://github.com/mgcrea/homebridge-zigbee#readme",
+  "bugs": "https://github.com/mgcrea/homebridge-zigbee/issues",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "main": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "files": [
+    "dist",
+    "config.schema.json"
+  ],
+  "imports": {
+    "#*": "./src/*.ts"
+  },
+  "keywords": [
+    "homebridge-plugin",
+    "homebridge",
+    "homekit",
+    "zigbee",
+    "zigbee-on-host",
+    "zbt-2",
+    "hue",
+    "philips-hue",
+    "coordinator"
+  ],
+  "engines": {
+    "node": "^22 || ^24 || ^26",
+    "homebridge": "^2.0.0"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsdown --watch",
+    "lint": "oxlint src/ test/ scripts/",
+    "lint:fix": "oxlint --fix src/ test/ scripts/",
+    "format": "oxfmt --write src/ test/ scripts/",
+    "format:check": "oxfmt --check src/ test/ scripts/",
+    "check": "tsc --noEmit",
+    "spec": "vitest --run",
+    "coverage": "vitest --run --coverage",
+    "watch": "vitest",
+    "diagnose": "tsx scripts/diagnose.ts",
+    "pair": "tsx scripts/pair.ts",
+    "dev:homebridge": "homebridge -D -U ./.homebridge -P . --strict-plugin-resolution",
+    "test": "pnpm run lint && pnpm run check && pnpm run spec && pnpm run format:check",
+    "release": "release-it",
+    "prepublishOnly": "pnpm run test && pnpm run build"
+  },
+  "dependencies": {
+    "zigbee-herdsman": "^10.9.1",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@tsconfig/node-lts": "^24.0.0",
+    "@tsconfig/strictest": "^2.0.8",
+    "@types/node": "^24.10.3",
+    "@vitest/coverage-v8": "^4.1.10",
+    "homebridge": "^2.2.1",
+    "oxfmt": "^0.61.0",
+    "oxlint": "^1.76.0",
+    "release-it": "^21.0.1",
+    "tsdown": "^0.21.8",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  },
+  "packageManager": "pnpm@10.33.2"
+}

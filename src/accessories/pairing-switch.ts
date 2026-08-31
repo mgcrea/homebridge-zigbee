@@ -70,8 +70,8 @@ export class PairingSwitch {
       if (wanted) {
         this.platform.log.info(
           `Pairing is open for ${seconds}s. Put the device into pairing mode now. ` +
-            "A Hue bulb already paired to a Hue bridge must be factory reset first — " +
-            "remove it in the Hue app, or power-cycle it five times.",
+            "A Hue bulb already paired to a Hue bridge must be factory reset first: delete it " +
+            "in the Hue app, or power cycle it off 2s / on 8s, five times over.",
         );
       } else {
         this.platform.log.info("Pairing closed.");

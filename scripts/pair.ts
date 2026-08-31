@@ -11,9 +11,13 @@
  *   ZIGBEE_PORT=/dev/serial/by-id/usb-Nabu_Casa_ZBT-2_...-if00 pnpm pair 120
  *
  * A Hue bulb already paired to a Hue bridge will not join until it is factory
- * reset — remove it in the Hue app, or power-cycle it five times. This plugin's
- * Zigbee stack does not implement Touchlink, so there is no over-the-air way to
- * take it from the bridge.
+ * reset. Delete it in the Hue app (on a bridge, that is a factory reset), or
+ * power cycle it with the timing the bulb actually counts: starting from on,
+ * off for 2s and on for 8s, five times over. A quick flick does nothing.
+ *
+ * A Hue Dimmer Switch held next to the bulb works too, via Touchlink between
+ * those two — this plugin's own stack implements no Touchlink, so it cannot
+ * reset a bulb for you.
  */
 import { resolve } from "node:path";
 import { Controller } from "zigbee-herdsman";

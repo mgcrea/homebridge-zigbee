@@ -75,9 +75,22 @@ ZIGBEE_PORT=/dev/serial/by-id/usb-Nabu_Casa_ZBT-2_XXXX-if00 pnpm pair 120
 
 ### Hue bulbs must be factory reset first
 
-A bulb currently paired to a Hue bridge will not join. Remove it in the Hue app, or power-cycle
-it five times. The `zoh` stack does not implement Touchlink, so there is no over-the-air way to
-take a bulb off its old bridge — that is a real limitation, not a missing setting.
+A bulb currently paired to a Hue bridge will not join. Any of these resets it:
+
+- **Delete it in the Hue app.** If the bulb is on a Hue bridge, removing it there *is* a factory
+  reset. Easiest route.
+- **Power cycle, with the right timing.** Starting with the bulb **on**: off for **2 seconds**,
+  on for **8 seconds**, repeated **5 times**. A quick flick of the switch does not work — the
+  dwell times are what the bulb is counting. This route is unavailable if the bulb's power-on
+  behaviour was set to `off`, because cutting power then will not bring it back on at all.
+- **Hue Dimmer Switch.** Power cycle the bulb, hold the dimmer within ~10cm, then hold **I/On and
+  0/Off together for 10-12 seconds** until the bulb flashes several times. Release a second after
+  the last flash, then power cycle again.
+
+The dimmer method is Touchlink, running directly between the dimmer and the bulb — this plugin's
+coordinator is not involved, so it works regardless of what the `zoh` stack implements. What
+`zoh` not implementing Touchlink *does* mean is that **the plugin itself cannot reset a bulb for
+you**; you need one of the above.
 
 ## Network state, and why you should back it up
 

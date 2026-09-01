@@ -71,7 +71,25 @@ export const openController = async (
     acceptJoiningDeviceHandler: async () => await Promise.resolve(true),
   });
 
-  const result = await controller.start();
+  let result: Awaited<ReturnType<Controller["start"]>>;
+  try {
+    result = await controller.start();
+  } catch (error) {
+    // Release the serial port before giving up on this attempt.
+    //
+    // `start()` opens the port and *then* does the Spinel handshake, so a
+    // handshake timeout leaves the port open inside a controller nobody holds a
+    // reference to. Every retry after that fails with "Cannot lock port", and
+    // the plugin locks itself out of its own radio until Homebridge restarts —
+    // which is exactly what the retry loop exists to avoid.
+    try {
+      await controller.stop();
+    } catch {
+      // Nothing useful to add: the port is being abandoned either way.
+    }
+    throw error;
+  }
+
   log.info(`Coordinator ${result} the network on channel ${config.channel}.`);
 
   return { controller, result };
@@ -136,11 +154,35 @@ export class ControllerSupervisor {
     return this.#controller;
   }
 
+  /**
+   * Open the coordinator, and keep trying if it is not ready yet.
+   *
+   * The first attempt failing is not a reason to give up for the lifetime of
+   * the process. A USB coordinator is routinely unavailable for a moment —
+   * after a container restart the previous process may not have released it,
+   * and a ZBT-2's USB bridge needs a beat before it answers Spinel at all.
+   * Observed as `SPINEL[tid=1] Timeout after 10000ms` on a fast restart, which
+   * previously left the plugin dead until Homebridge itself was restarted.
+   *
+   * A refusal to proceed on a reset network is different: that is a deliberate
+   * decision, not a transient fault, so it is re-thrown rather than retried.
+   */
   async start(): Promise<void> {
-    const outcome = await openController(this.config, this.paths, this.log);
-    this.#adopt(outcome.controller);
-    this.#backoff.reset();
-    await this.onReady(outcome.controller, outcome.result);
+    try {
+      const outcome = await openController(this.config, this.paths, this.log);
+      this.#adopt(outcome.controller);
+      this.#backoff.reset();
+      await this.onReady(outcome.controller, outcome.result);
+    } catch (error) {
+      if (error instanceof NetworkResetError) throw error;
+
+      this.log.error(`Could not open the Zigbee coordinator: ${describe(error)}`);
+      this.log.info(
+        `Check that ${this.config.port} exists and that nothing else has it open ` +
+          "(zigbee2mqtt, ZHA and this plugin cannot share a radio). Retrying meanwhile.",
+      );
+      void this.#reconnect();
+    }
   }
 
   #adopt(controller: Controller): void {
@@ -177,6 +219,11 @@ export class ControllerSupervisor {
           this.log.info("Coordinator reconnected.");
           return;
         } catch (error) {
+          if (error instanceof NetworkResetError) {
+            // Deliberate refusal: retrying cannot change the answer.
+            this.log.error(error.message);
+            return;
+          }
           this.log.error(`Could not reopen the coordinator: ${describe(error)}`);
         }
       }

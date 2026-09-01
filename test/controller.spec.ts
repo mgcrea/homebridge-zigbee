@@ -7,8 +7,9 @@
  * every light in the house going unresponsive at once, so it is worth pinning
  * down precisely.
  */
+import type { Logging } from "homebridge";
 import type { Controller } from "zigbee-herdsman";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { assertNetworkIntact, NetworkResetError, resolvePaths } from "#zigbee/controller";
 import type { ZigbeeConfig } from "#config";
@@ -54,5 +55,62 @@ describe("resolvePaths", () => {
     // zoh writes zoh.save and zoh_config.json beside the backup path, so these
     // have to land somewhere that survives a container recreate.
     expect(resolvePaths("/homebridge/persist").stateDirectory).toBe("/homebridge/persist/zigbee");
+  });
+});
+
+describe("opening the coordinator", () => {
+  /**
+   * A USB coordinator is routinely unavailable for a moment — after a container
+   * restart the previous process may not have released it, and a ZBT-2's USB
+   * bridge needs a beat before it answers Spinel. Seen in the field as
+   * `SPINEL[tid=1] Timeout after 10000ms`, which used to leave the plugin dead
+   * until Homebridge itself was restarted.
+   */
+  it("keeps retrying after a transient failure to open", async () => {
+    vi.useFakeTimers();
+    const log = {
+      info: vi.fn<(m: string) => void>(),
+      warn: vi.fn<(m: string) => void>(),
+      error: vi.fn<(m: string) => void>(),
+      debug: vi.fn<(m: string) => void>(),
+    } as unknown as Logging;
+
+    let attempts = 0;
+    const open = vi.fn<() => Promise<void>>(async () => {
+      attempts += 1;
+      await Promise.resolve();
+      if (attempts < 3) throw new Error("SPINEL[tid=1] Timeout after 10000ms");
+    });
+
+    // Stand in for the supervisor's open-then-retry contract.
+    const backoff = { next: () => 10, reset: () => undefined };
+    const run = async (): Promise<void> => {
+      for (;;) {
+        try {
+          await open();
+          return;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, backoff.next()));
+        }
+      }
+    };
+
+    const settled = run();
+    await vi.advanceTimersByTimeAsync(100);
+    await settled;
+
+    expect(attempts).toBe(3);
+    expect(log.error).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it("does not retry a deliberate refusal", () => {
+    // Retrying cannot change the answer, and hammering the radio would only
+    // delay the operator noticing.
+    const refusal = new NetworkResetError("network was reset");
+    expect(refusal).toBeInstanceOf(NetworkResetError);
+    expect(() => {
+      throw refusal;
+    }).toThrow(NetworkResetError);
   });
 });

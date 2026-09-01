@@ -120,15 +120,13 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
     try {
       await this.#supervisor.start();
     } catch (error) {
+      // The supervisor retries transient failures itself and only lets a
+      // deliberate refusal reach here.
       if (error instanceof NetworkResetError) {
         this.log.error(error.message);
         return;
       }
-      this.log.error(`Could not open the Zigbee coordinator: ${describe(error)}`);
-      this.log.error(
-        `Check that ${config.port} exists and that nothing else has it open ` +
-          "(zigbee2mqtt, ZHA and this plugin cannot share a radio).",
-      );
+      this.log.error(`Zigbee platform could not start: ${describe(error)}`);
     }
   }
 

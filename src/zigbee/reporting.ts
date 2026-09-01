@@ -37,36 +37,48 @@ const INTERVALS = {
 } as const;
 
 /**
- * Bind a cluster, then run its reporting setup.
+ * Bind a cluster so its reports have somewhere to go.
  *
- * Failures are logged and shrugged off on purpose. A light that refuses
- * reporting still works through commands and the periodic refresh — degrading
- * to "polled" is much better than refusing to expose the device at all.
+ * Returns whether the binding took. Reporting without one goes nowhere, so
+ * there is no point configuring it if this fails.
  */
-const bindThen = async (
+const bind = async (
   endpoint: Models.Endpoint,
   coordinator: Models.Endpoint,
   log: Logging,
   cluster: string,
-  configure: () => Promise<void>,
-): Promise<void> => {
-  if (!endpoint.supportsInputCluster(cluster)) return;
+): Promise<boolean> => {
+  if (!endpoint.supportsInputCluster(cluster)) return false;
 
   try {
     await endpoint.bind(cluster, coordinator);
+    return true;
   } catch (error) {
     log.debug(`Could not bind ${cluster} on ${endpoint.deviceIeeeAddress}: ${describe(error)}`);
-    // Reporting without a binding goes nowhere, so skip configuring it.
-    return;
+    return false;
   }
+};
 
+/**
+ * Configure one attribute, and report whether it took.
+ *
+ * One attribute per call, deliberately. A single `configureReporting` carrying
+ * several attributes is one command: a device that refuses any one record
+ * fails the whole thing, and the attributes it would happily have reported are
+ * lost with it. Observed on a Hue Play, which accepted onOff and currentLevel
+ * but silently ended up with no colour reporting at all.
+ *
+ * A failure is logged and shrugged off. A light that refuses reporting still
+ * works through commands and the periodic refresh; degrading to "polled" beats
+ * refusing to expose the device.
+ */
+const report = async (log: Logging, what: string, run: () => Promise<void>): Promise<boolean> => {
   try {
-    await configure();
+    await run();
+    return true;
   } catch (error) {
-    log.debug(
-      `${endpoint.deviceIeeeAddress} refused reporting for ${cluster}: ${describe(error)}. ` +
-        "Falling back to periodic reads for this device.",
-    );
+    log.debug(`Reporting refused for ${what}: ${describe(error)}`);
+    return false;
   }
 };
 
@@ -75,30 +87,77 @@ export const configureReporting = async (
   coordinator: Models.Endpoint,
   log: Logging,
 ): Promise<void> => {
-  await bindThen(endpoint, coordinator, log, CLUSTER.onOff, async () => {
-    await endpoint.configureReporting("genOnOff", [
-      { attribute: "onOff", ...INTERVALS, reportableChange: 0 },
-    ]);
-  });
+  const configured: string[] = [];
+  const refused: string[] = [];
+  const note = (name: string, ok: boolean): void => {
+    (ok ? configured : refused).push(name);
+  };
 
-  await bindThen(endpoint, coordinator, log, CLUSTER.level, async () => {
-    await endpoint.configureReporting("genLevelCtrl", [
-      { attribute: "currentLevel", ...INTERVALS, reportableChange: 1 },
-    ]);
-  });
+  if (await bind(endpoint, coordinator, log, CLUSTER.onOff)) {
+    note(
+      "onOff",
+      // Discrete types (BOOLEAN here) take no reportableChange: the ZCL has no
+      // notion of "changed by more than N" for a value that only has states.
+      await report(log, "genOnOff.onOff", async () => {
+        await endpoint.configureReporting("genOnOff", [{ attribute: "onOff", ...INTERVALS }]);
+      }),
+    );
+  }
 
-  await bindThen(endpoint, coordinator, log, CLUSTER.color, async () => {
-    await endpoint.configureReporting("lightingColorCtrl", [
-      { attribute: "colorTemperature", ...INTERVALS, reportableChange: 1 },
-      // Without this, a colourTemperature report cannot be told apart from the
-      // stale value a light in xy mode reports for the same attribute.
-      { attribute: "colorMode", ...INTERVALS, reportableChange: 0 },
-      // xy is uint16, so a change of 256 is roughly 0.4% of the axis — enough
-      // to notice a real colour change without reporting on sensor noise.
-      { attribute: "currentX", ...INTERVALS, reportableChange: 256 },
-      { attribute: "currentY", ...INTERVALS, reportableChange: 256 },
-    ]);
-  });
+  if (await bind(endpoint, coordinator, log, CLUSTER.level)) {
+    note(
+      "currentLevel",
+      await report(log, "genLevelCtrl.currentLevel", async () => {
+        await endpoint.configureReporting("genLevelCtrl", [
+          { attribute: "currentLevel", ...INTERVALS, reportableChange: 1 },
+        ]);
+      }),
+    );
+  }
+
+  if (await bind(endpoint, coordinator, log, CLUSTER.color)) {
+    note(
+      "colorTemperature",
+      await report(log, "lightingColorCtrl.colorTemperature", async () => {
+        await endpoint.configureReporting("lightingColorCtrl", [
+          { attribute: "colorTemperature", ...INTERVALS, reportableChange: 1 },
+        ]);
+      }),
+    );
+
+    note(
+      "colorMode",
+      // ENUM8 — discrete, so no reportableChange. Sending one is what made the
+      // whole colour-cluster request fail before.
+      await report(log, "lightingColorCtrl.colorMode", async () => {
+        await endpoint.configureReporting("lightingColorCtrl", [
+          { attribute: "colorMode", ...INTERVALS },
+        ]);
+      }),
+    );
+
+    for (const axis of ["currentX", "currentY"] as const) {
+      note(
+        axis,
+        await report(log, `lightingColorCtrl.${axis}`, async () => {
+          await endpoint.configureReporting("lightingColorCtrl", [
+            // uint16, so 256 is roughly 0.4% of the axis — enough to catch a
+            // real colour change without reporting on sensor noise.
+            { attribute: axis, ...INTERVALS, reportableChange: 256 },
+          ]);
+        }),
+      );
+    }
+  }
+
+  if (refused.length > 0) {
+    log.info(
+      `${endpoint.deviceIeeeAddress}: reporting on ${configured.join(", ") || "nothing"}; ` +
+        `refused for ${refused.join(", ")}. Those fall back to the periodic refresh.`,
+    );
+  } else {
+    log.debug(`${endpoint.deviceIeeeAddress}: reporting on ${configured.join(", ")}.`);
+  }
 };
 
 /**

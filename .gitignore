@@ -15,3 +15,6 @@ coverage/
 # Zigbee network state written by scripts/diagnose.ts and scripts/pair.ts.
 # zoh.save and identity.json hold the network key: never commit them.
 .zigbee/
+
+# Tarballs from `npm pack`; never committed.
+*.tgz

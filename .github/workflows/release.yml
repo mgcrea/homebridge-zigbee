@@ -3,13 +3,12 @@ name: release
 # Versioning, tagging and the GitHub release are done locally by release-it
 # (`pnpm release`). This workflow only publishes the tag to npm.
 #
-# Tags are unprefixed semver (`0.2.0`), matching the other repos in this org.
-# The `v`-prefixed form is accepted too so a hand-cut tag still publishes.
+# Both tag spellings are accepted so a hand-cut tag still publishes.
 on:
   push:
     tags:
-      - "[0-9]+.[0-9]+.[0-9]+*"
       - "v[0-9]+.[0-9]+.[0-9]+*"
+      - "[0-9]+.[0-9]+.[0-9]+*"
 
 # Trusted publishing: npm verifies this workflow's OIDC identity, so there is no
 # NPM_TOKEN to store or rotate. Do not set NODE_AUTH_TOKEN — it takes precedence
@@ -18,25 +17,34 @@ permissions:
   contents: read
   id-token: write
 
+# Never cancel a publish in flight, and never run two at once: npm rejects the
+# loser of a race on the same version, which reads as a failed release.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
           registry-url: https://registry.npmjs.org
 
       # Trusted publishing needs npm 11.5.1+, which is newer than the version
-      # bundled with some runner images.
+      # bundled with some runner images. Held to the same major so a future npm
+      # release cannot change publish behaviour without an edit here.
       - name: Update npm
-        run: npm install -g npm@latest
+        run: npm install -g npm@^11
 
       - run: pnpm install --frozen-lockfile
 
@@ -58,6 +66,28 @@ jobs:
       - run: pnpm run spec
       - run: pnpm run build
 
+      # What actually ships. `files` is narrow enough that a build that emitted
+      # nothing would otherwise publish an empty package without complaint.
+      - name: Inspect the tarball
+        run: npm pack --dry-run
+
       # --provenance links the published tarball to this workflow run.
+      #
+      # --ignore-scripts skips `prepublishOnly`, which is the local safety net
+      # for a hand-run `npm publish`; the steps above are that same suite, and
+      # without this it runs twice per release.
+      #
+      # The dist-tag is derived from the version rather than left to default:
+      # `npm publish` tags whatever it is given as `latest`, so a prerelease
+      # would have been handed to every installed user on their next upgrade.
+      # A prerelease publishes under its own identifier — 0.3.0-beta.0 goes
+      # out as `beta`, and only someone who asks for it gets it.
       - name: Publish to npm
-        run: npm publish --provenance --access public
+        run: |
+          pkg="$(node -p "require('./package.json').version")"
+          case "$pkg" in
+            *-*) dist_tag="$(printf '%s' "${pkg#*-}" | cut -d. -f1)" ;;
+            *)   dist_tag=latest ;;
+          esac
+          echo "Publishing $pkg under dist-tag $dist_tag"
+          npm publish --provenance --ignore-scripts --tag "$dist_tag"

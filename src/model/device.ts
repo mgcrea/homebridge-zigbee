@@ -71,6 +71,17 @@ export const describeEndpoint = async (
   endpoint: Models.Endpoint,
   log: Logging,
 ): Promise<DeviceView> => {
+  // Optional in the ZCL and absent on plenty of devices, so this is best-effort
+  // and never allowed to fail discovery.
+  let productLabel: string | undefined;
+  try {
+    const basic = await endpoint.read("genBasic", ["productLabel"]);
+    const value = basic["productLabel"];
+    if (typeof value === "string") productLabel = value;
+  } catch {
+    // Unsupported attribute; the vendor + device-type fallback covers it.
+  }
+
   let colorCapabilities: number | undefined;
   let physicalMin: number | undefined;
   let physicalMax: number | undefined;
@@ -103,7 +114,7 @@ export const describeEndpoint = async (
     ieee: device.ieeeAddr,
     endpointId: endpoint.ID,
     key: stateKey(device.ieeeAddr, endpoint.ID),
-    name: defaultName(device, endpoint),
+    name: defaultName(device, endpoint, productLabel),
     manufacturer: device.manufacturerName?.trim() || "Zigbee",
     model: device.modelID?.trim() || "Unknown",
     firmware: device.softwareBuildID?.trim() || undefined,
@@ -120,13 +131,86 @@ const numeric = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
 
 /**
+ * Vendor strings as they appear on the wire, and what people actually call them.
+ *
+ * `manufacturerName` is a legal entity — "Signify Netherlands B.V." — which is
+ * nobody's name for the thing on their shelf.
+ */
+const VENDOR_ALIASES: readonly (readonly [RegExp, string])[] = [
+  [/^signify|^philips/i, "Hue"],
+  [/^ikea/i, "IKEA"],
+  [/^lumi|^xiaomi|^aqara/i, "Aqara"],
+  [/^_tz|^tuya/i, "Tuya"],
+  [/^innr/i, "Innr"],
+  [/^ledvance|^osram/i, "Ledvance"],
+  [/^gledopto/i, "Gledopto"],
+];
+
+/**
+ * Zigbee device identifiers as a noun a person would use.
+ *
+ * These come from the endpoint's simple descriptor, so they cost nothing to
+ * read and cover every device of a type rather than every model of one.
+ */
+const DEVICE_TYPE_NAMES = new Map<number, string>([
+  [0x0051, "Smart Plug"],
+  [0x0100, "Light"],
+  [0x0101, "Dimmable Light"],
+  [0x0102, "Colour Light"],
+  [0x010c, "White Light"],
+  [0x010d, "Colour Light"],
+]);
+
+const vendorAlias = (manufacturerName: string | undefined): string | undefined => {
+  const name = manufacturerName?.trim();
+  if (!name) return undefined;
+  for (const [pattern, alias] of VENDOR_ALIASES) {
+    if (pattern.test(name)) return alias;
+  }
+  // An unrecognised vendor is still better shown than hidden — but a legal
+  // suffix is noise in a HomeKit tile.
+  return name.replace(/\s+(B\.?V\.?|GmbH|Ltd\.?|Inc\.?|Co\.?,?\s*Ltd\.?)\.?$/i, "").trim();
+};
+
+/**
  * A name to show before the user renames it in the Home app.
  *
- * The endpoint number is only appended for genuinely multi-endpoint devices,
- * where "Bulb" and "Bulb" would otherwise be indistinguishable.
+ * Preference order is deliberate. `genBasic.productLabel` exists in the ZCL for
+ * exactly this purpose, so a device that fills it in wins outright. Failing
+ * that, the vendor plus the Zigbee device type reads far better than the raw
+ * `modelId`, which is a part number: "Hue Colour Light", not "440400982842".
+ *
+ * Nothing here is a device database — every input is something the device
+ * already told us during its interview.
  */
-const defaultName = (device: Models.Device, endpoint: Models.Endpoint): string => {
-  const base = device.modelID?.trim() || device.ieeeAddr;
+export const friendlyName = (
+  device: Pick<Models.Device, "manufacturerName" | "modelID" | "ieeeAddr">,
+  deviceId: number | undefined,
+  productLabel: string | undefined,
+): string => {
+  const label = productLabel?.trim();
+  if (label) return label;
+
+  const vendor = vendorAlias(device.manufacturerName);
+  const noun = deviceId === undefined ? undefined : DEVICE_TYPE_NAMES.get(deviceId);
+  const model = device.modelID?.trim();
+
+  if (vendor && noun) return `${vendor} ${noun}`;
+  if (vendor && model) return `${vendor} ${model}`;
+  if (vendor) return vendor;
+  return model || device.ieeeAddr;
+};
+
+/**
+ * The endpoint number is only appended for genuinely multi-endpoint devices,
+ * where two identical names would otherwise be indistinguishable.
+ */
+const defaultName = (
+  device: Models.Device,
+  endpoint: Models.Endpoint,
+  productLabel: string | undefined,
+): string => {
+  const base = friendlyName(device, endpoint.deviceID, productLabel);
   const controllable = device.endpoints.filter(
     (candidate) => candidate.getInputClusters().length > 0,
   );

@@ -19,6 +19,20 @@
 /** Long enough to catch HomeKit's split writes, short enough to feel instant. */
 export const COALESCE_WINDOW_MS = 50;
 
+/**
+ * Floor on the gap between commands to one device.
+ *
+ * The coalescing window alone bounds a *burst*, not a *stream*. Dragging the
+ * colour wheel in the Home app emits writes continuously for as long as the
+ * finger moves, so a 50ms window turns a few seconds of play into dozens of
+ * radio transmissions back to back — enough to wedge an OT-RCP coordinator
+ * outright, which is how this was found.
+ *
+ * Throttling to four commands a second is invisible to a person dragging a
+ * slider (the light's own fade is longer than the gap) and keeps the mesh calm.
+ */
+export const MIN_COMMAND_INTERVAL_MS = 250;
+
 export type Task<T> = () => Promise<T>;
 
 /**
@@ -32,8 +46,13 @@ export class DeviceQueue {
   #tail: Promise<unknown> = Promise.resolve();
   readonly #pending = new Map<string, { timer: NodeJS.Timeout; task: Task<unknown> }>();
   #disposed = false;
+  /** When the last coalesced task was actually dispatched. */
+  #lastDispatch = 0;
 
-  constructor(private readonly window: number = COALESCE_WINDOW_MS) {}
+  constructor(
+    private readonly window: number = COALESCE_WINDOW_MS,
+    private readonly minInterval: number = MIN_COMMAND_INTERVAL_MS,
+  ) {}
 
   /** Run a task after everything already queued for this device. */
   async run<T>(task: Task<T>): Promise<T> {
@@ -60,10 +79,18 @@ export class DeviceQueue {
       clearTimeout(existing.timer);
     }
 
+    // Wait out the coalescing window, and additionally hold off until enough
+    // time has passed since the last dispatch. A held-back task is replaced by
+    // whatever arrives meanwhile, so throttling costs freshness, never the
+    // final value: the newest one always goes out.
+    const sinceLast = Date.now() - this.#lastDispatch;
+    const delay = Math.max(this.window, this.minInterval - sinceLast);
+
     const timer = setTimeout(() => {
       this.#pending.delete(key);
+      this.#lastDispatch = Date.now();
       void this.run(task).catch(() => undefined);
-    }, this.window);
+    }, delay);
     timer.unref?.();
 
     this.#pending.set(key, { timer, task });
@@ -74,6 +101,7 @@ export class DeviceQueue {
     for (const [key, { timer, task }] of this.#pending) {
       clearTimeout(timer);
       this.#pending.delete(key);
+      this.#lastDispatch = Date.now();
       void this.run(task).catch(() => undefined);
     }
   }

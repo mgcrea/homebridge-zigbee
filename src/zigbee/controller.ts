@@ -67,7 +67,13 @@ export const openController = async (
     // zoh keeps its own state in `zoh.save` beside this file and never writes a
     // coordinator backup, but herdsman still requires the path.
     backupPath: join(paths.stateDirectory, "backup.json"),
-    adapter: { disableLED: false },
+    adapter: {
+      disableLED: false,
+      // One radio request at a time. The default of 8 lets a burst of
+      // characteristic writes put eight simultaneous transmissions on a single
+      // radio, which is how an OT-RCP coordinator ends up wedged.
+      concurrent: 1,
+    },
     acceptJoiningDeviceHandler: async () => await Promise.resolve(true),
   });
 

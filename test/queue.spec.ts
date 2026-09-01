@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { COALESCE_WINDOW_MS, DeviceQueue } from "#model/queue";
+import { COALESCE_WINDOW_MS, DeviceQueue, MIN_COMMAND_INTERVAL_MS } from "#model/queue";
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -90,5 +90,64 @@ describe("DeviceQueue", () => {
 
     await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS + 5);
     expect(ran).not.toHaveBeenCalled();
+  });
+});
+
+describe("throttling a stream of writes", () => {
+  /**
+   * Dragging the colour wheel emits writes for as long as the finger moves.
+   * The coalescing window bounds a burst but not a stream, and an unthrottled
+   * stream wedged a real OT-RCP coordinator.
+   */
+  it("paces a continuous drag instead of flooding the radio", async () => {
+    const queue = new DeviceQueue();
+    const sent: number[] = [];
+
+    // Two seconds of dragging, a write every 20ms — 100 writes.
+    for (let i = 0; i < 100; i += 1) {
+      queue.coalesce("apply", async () => {
+        sent.push(i);
+        await Promise.resolve();
+      });
+      await vi.advanceTimersByTimeAsync(20);
+    }
+    await vi.advanceTimersByTimeAsync(MIN_COMMAND_INTERVAL_MS * 2);
+
+    // 2s at 4/s is ~8, not 100. Generous bound: the point is the order of
+    // magnitude, not an exact count.
+    expect(sent.length).toBeLessThanOrEqual(15);
+    expect(sent.length).toBeGreaterThan(0);
+  });
+
+  it("always sends the newest value last, however hard it throttled", async () => {
+    const queue = new DeviceQueue();
+    const sent: number[] = [];
+
+    for (let i = 0; i < 20; i += 1) {
+      queue.coalesce("apply", async () => {
+        sent.push(i);
+        await Promise.resolve();
+      });
+      await vi.advanceTimersByTimeAsync(10);
+    }
+    await vi.advanceTimersByTimeAsync(MIN_COMMAND_INTERVAL_MS * 2);
+
+    // Throttling may drop intermediate values — a slider's are already stale —
+    // but the light must end up where the user left it.
+    expect(sent.at(-1)).toBe(19);
+  });
+
+  it("still answers a single write promptly", async () => {
+    const queue = new DeviceQueue();
+    const sent: string[] = [];
+
+    queue.coalesce("apply", async () => {
+      sent.push("on");
+      await Promise.resolve();
+    });
+    await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS + 5);
+
+    // A lone tap must not wait out the throttle interval.
+    expect(sent).toEqual(["on"]);
   });
 });

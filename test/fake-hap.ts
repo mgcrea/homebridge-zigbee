@@ -73,12 +73,25 @@ export class FakeService {
   }
 }
 
+/** Records that a controller was configured, which is all the specs need to see. */
+export class FakeAdaptiveLightingController {
+  constructor(
+    readonly service: unknown,
+    readonly options: Record<string, unknown>,
+  ) {}
+}
+
 export class FakeAccessory {
   readonly services: FakeService[] = [];
   readonly context: Record<string, unknown> = {};
+  readonly controllers: unknown[] = [];
   displayName = "";
 
   constructor(public UUID = "uuid-1") {}
+
+  configureController(controller: unknown): void {
+    this.controllers.push(controller);
+  }
 
   getService(type: string): FakeService | undefined {
     return this.services.find((service) => service.type === type && !service.subtype);
@@ -172,7 +185,20 @@ export const createFakePlatform = (
   ({
     Service: nameProxy,
     Characteristic: nameProxy,
-    api: { hap: { HapStatusError: FakeHapStatusError } },
+    api: {
+      hap: {
+        HapStatusError: FakeHapStatusError,
+        AdaptiveLightingController: FakeAdaptiveLightingController,
+        // Real hap-nodejs maths would only make the assertions harder to read;
+        // the specs care that the mirroring happens, not what warm white is.
+        ColorUtils: {
+          colorTemperatureToHueAndSaturation: (mired: number) => ({
+            hue: Math.round(mired / 10),
+            saturation: 42,
+          }),
+        },
+      },
+    },
     log: overrides.log ?? createFakeLog(),
     state: overrides.state ?? new StateStore(),
     controller: undefined,
@@ -187,6 +213,7 @@ export const createFakePlatform = (
       permitJoinDuration: 120,
       refreshInterval: 300,
       transitionTime: 0.4,
+      adaptiveLighting: true,
       allowNetworkReset: false,
       debug: false,
       devices: [],

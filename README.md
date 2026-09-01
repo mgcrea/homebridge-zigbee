@@ -114,6 +114,53 @@ refuses to start and says so, rather than filling the Home app with tiles backed
 Restore `zigbee/` from a backup. `allowNetworkReset` overrides this if you genuinely want to
 start over.
 
+## Adaptive Lighting
+
+Lights that support both dimming and colour temperature are offered Apple's **Adaptive
+Lighting**, which drifts them cool during the day and warm in the evening. It appears in the
+light's settings in the Home app; `adaptiveLighting: false` turns it off.
+
+It runs in hap-nodejs's AUTOMATIC mode, which drives the schedule by calling the
+ColorTemperature set handler once a minute. That is one Zigbee command per minute, and it goes
+through the same coalescing and throttling as any other write. MANUAL mode would push the
+transition onto the bulb itself, but it means re-implementing the transition curve, its
+brightness adjustment and its notification thresholds by hand — a poor trade for one command a
+minute.
+
+Note that Adaptive Lighting moves **colour temperature only**. Choosing a colour in the Home app
+switches it off, which is HomeKit's own behaviour.
+
+## Firmware: pin the version, do not chase the newest
+
+**With `adapter: zoh`, the RCP firmware must match zigbee-on-host's era.** zigbee-on-host 0.2.4
+was published in December 2025 and has not been released since.
+
+| Firmware | Result |
+| --- | --- |
+| `SL-OPENTHREAD/3.0.2.0` (Nerivec `v2025.12.3-pre1`) | works |
+| `SL-OPENTHREAD/3.1.1.0` (Nerivec `v2026.6.1-pre1`) | **broken** — transmits die ~12s after start, then the radio stops answering entirely |
+
+Newer is worse here, which is the opposite of the usual instinct. Swapping RCP firmware needs no
+re-pairing: zoh keeps the whole network host-side in `zoh.save`, with a host-assigned EUI64.
+
+## Recovering a wedged coordinator
+
+An OT-RCP coordinator can stop responding — no reply even to a raw Spinel probe. The plugin
+reports `SPINEL[tid=1] Timeout` and then retries with backoff, so it recovers on its own **once
+the radio does**, but the radio itself needs a nudge:
+
+```bash
+pipx run universal-silabs-flasher --device /dev/ttyACM0 \
+  --bootloader-reset baudrate probe
+```
+
+That resets the radio chip, relaunches its firmware and prints the version. Stop Homebridge
+first so the port is free.
+
+**A USB re-enumeration is not enough** (`echo 0 > /sys/bus/usb/devices/*/authorized`, then `1`):
+the ZBT-2's USB bridge re-enumerates happily while the radio behind it stays dead. Only the
+bootloader reset revives it.
+
 ## Running in Docker
 
 The container needs the device passed through. In `docker-compose.yml`:

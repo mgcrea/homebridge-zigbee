@@ -2,8 +2,8 @@
   "pluginAlias": "Zigbee",
   "pluginType": "platform",
   "singular": true,
-  "headerDisplay": "Drives a Zigbee coordinator directly and exposes the lights and outlets paired to it in HomeKit.\n\nThere is no vendor bridge and no second daemon: this plugin owns the radio itself. Nothing else may hold the same coordinator open at the same time — zigbee2mqtt, ZHA and this plugin cannot share one.",
-  "footerDisplay": "**Pairing.** Turn on the *Zigbee Pairing* switch in the Home app, then put the device into pairing mode. The switch turns itself off when the window closes.\n\n**Hue bulbs already on a Hue bridge must be factory reset first.** Easiest: delete the bulb in the Hue app — on a bridge, removing it there is a factory reset. Otherwise power cycle it with the right timing: starting with the bulb on, off for 2 seconds and on for 8 seconds, five times over (a quick flick will not do it). A Hue Dimmer Switch also works: hold it close to the bulb and press I/On and 0/Off together for 10-12 seconds. This plugin cannot reset a bulb for you — its Zigbee stack does not implement Touchlink.\n\n**Your network key is generated once and stored outside this file**, in `zigbee/identity.json` under Homebridge's storage directory. Back that directory up: losing it means forming a new network and pairing every device again.",
+  "headerDisplay": "Drives a Zigbee coordinator directly and exposes the lights and outlets paired to it in HomeKit.\n\nThere is no vendor bridge and no second daemon: this plugin owns the radio itself. Nothing else may hold the same coordinator open at the same time \u2014 zigbee2mqtt, ZHA and this plugin cannot share one.",
+  "footerDisplay": "**Pairing.** Turn on the *Zigbee Pairing* switch in the Home app, then put the device into pairing mode. The switch turns itself off when the window closes.\n\n**Hue bulbs already on a Hue bridge must be factory reset first.** Easiest: delete the bulb in the Hue app \u2014 on a bridge, removing it there is a factory reset. Otherwise power cycle it with the right timing: starting with the bulb on, off for 2 seconds and on for 8 seconds, five times over (a quick flick will not do it). A Hue Dimmer Switch also works: hold it close to the bulb and press I/On and 0/Off together for 10-12 seconds. This plugin cannot reset a bulb for you \u2014 its Zigbee stack does not implement Touchlink.\n\n**Your network key is generated once and stored outside this file**, in `zigbee/identity.json` under Homebridge's storage directory. Back that directory up: losing it means forming a new network and pairing every device again.",
   "schema": {
     "type": "object",
     "properties": {
@@ -25,12 +25,42 @@
         "type": "string",
         "default": "zoh",
         "oneOf": [
-          { "title": "zoh — OpenThread RCP firmware (Zigbee on Host)", "enum": ["zoh"] },
-          { "title": "ember — EmberZNet NCP firmware (Silicon Labs)", "enum": ["ember"] },
-          { "title": "zstack — Texas Instruments Z-Stack", "enum": ["zstack"] },
-          { "title": "deconz — dresden elektronik ConBee", "enum": ["deconz"] },
-          { "title": "zboss", "enum": ["zboss"] },
-          { "title": "zigate", "enum": ["zigate"] }
+          {
+            "title": "zoh \u2014 OpenThread RCP firmware (Zigbee on Host)",
+            "enum": [
+              "zoh"
+            ]
+          },
+          {
+            "title": "ember \u2014 EmberZNet NCP firmware (Silicon Labs)",
+            "enum": [
+              "ember"
+            ]
+          },
+          {
+            "title": "zstack \u2014 Texas Instruments Z-Stack",
+            "enum": [
+              "zstack"
+            ]
+          },
+          {
+            "title": "deconz \u2014 dresden elektronik ConBee",
+            "enum": [
+              "deconz"
+            ]
+          },
+          {
+            "title": "zboss",
+            "enum": [
+              "zboss"
+            ]
+          },
+          {
+            "title": "zigate",
+            "enum": [
+              "zigate"
+            ]
+          }
         ],
         "description": "Must match the firmware actually on your stick, not the model of stick. A ZBT-2 ships with OpenThread RCP firmware, which is 'zoh'; the same hardware flashed with the Zigbee NCP image is 'ember'."
       },
@@ -53,6 +83,12 @@
         "minimum": 11,
         "maximum": 26,
         "description": "The 802.15.4 channel to form the network on. Zigbee shares the 2.4GHz band with Wi-Fi: channels 15, 20 and 25 sit in the gaps between Wi-Fi 1, 6 and 11. Changing this after devices are paired will strand them."
+      },
+      "adaptiveLighting": {
+        "title": "Adaptive Lighting",
+        "type": "boolean",
+        "default": true,
+        "description": "Offers Apple's Adaptive Lighting on lights that can do colour temperature, letting HomeKit drift them cool during the day and warm in the evening. Only appears on lights that support both dimming and colour temperature, which is Apple's requirement. Turn it off if you would rather control colour temperature yourself."
       },
       "exposePairingSwitch": {
         "title": "Show the Pairing Switch",
@@ -88,7 +124,7 @@
         "title": "Allow Network Reset",
         "type": "boolean",
         "default": false,
-        "description": "Leave this off. When the coordinator forms a NEW network while devices were still paired to the old one, the plugin refuses to start rather than filling HomeKit with tiles backed by nothing. Turning this on lets it proceed anyway — every device would then need to be paired again."
+        "description": "Leave this off. When the coordinator forms a NEW network while devices were still paired to the old one, the plugin refuses to start rather than filling HomeKit with tiles backed by nothing. Turning this on lets it proceed anyway \u2014 every device would then need to be paired again."
       },
       "debug": {
         "title": "Debug Logging",

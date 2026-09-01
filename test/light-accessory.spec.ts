@@ -265,3 +265,57 @@ describe("a device that refuses a command", () => {
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining("did not accept"));
   });
 });
+
+describe("Apple's Adaptive Lighting", () => {
+  it("is offered on a light with brightness and colour temperature", () => {
+    build();
+    // HomeKit accepts it only on a Lightbulb carrying both, which is exactly
+    // what the cluster-driven discovery derives.
+    expect(accessory.controllers).toHaveLength(1);
+  });
+
+  it("is withheld from a light that cannot do colour temperature", () => {
+    build(
+      colourLightView({ capabilities: new Set(["onOff", "brightness"]), miredRange: undefined }),
+    );
+    expect(accessory.controllers).toHaveLength(0);
+  });
+
+  it("is withheld from a light that cannot dim", () => {
+    build(colourLightView({ capabilities: new Set(["onOff", "colorTemperature"]) }));
+    expect(accessory.controllers).toHaveLength(0);
+  });
+
+  it("can be switched off in config", () => {
+    const platform = createFakePlatform({ log, state, config: { adaptiveLighting: false } });
+    const light = new LightAccessory(
+      platform,
+      accessory as unknown as PlatformAccessory,
+      colourLightView(),
+      endpoint as unknown as Models.Endpoint,
+    );
+
+    expect(light.disposed).toBe(false);
+    expect(accessory.controllers).toHaveLength(0);
+  });
+
+  it("mirrors a colour-temperature write onto hue and saturation without raising an event", () => {
+    build();
+    const before = service().getCharacteristic("Hue").setHandler;
+
+    service().write("ColorTemperature", 370);
+
+    // updateValue, never setValue: a setValue counts as a HomeKit write and
+    // would switch Adaptive Lighting off — which its own 60s schedule would
+    // then do to itself.
+    expect(service().getCharacteristic("Hue").value).toBe(37);
+    expect(service().getCharacteristic("Saturation").value).toBe(42);
+    expect(service().getCharacteristic("Hue").setHandler).toBe(before);
+  });
+
+  it("parks colour temperature at its minimum when a colour is chosen", () => {
+    build(colourLightView({ miredRange: { min: 153, max: 500 } }));
+    service().write("Hue", 200);
+    expect(service().getCharacteristic("ColorTemperature").value).toBe(153);
+  });
+});

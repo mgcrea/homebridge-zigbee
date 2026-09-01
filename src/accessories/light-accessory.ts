@@ -12,7 +12,12 @@
  * So writes are accumulated into a pending record and flushed once, as the
  * shortest command sequence that reaches the requested state.
  */
-import type { CharacteristicValue, PlatformAccessory, Service } from "homebridge";
+import type {
+  AdaptiveLightingController,
+  CharacteristicValue,
+  PlatformAccessory,
+  Service,
+} from "homebridge";
 import type { Models } from "zigbee-herdsman";
 
 import { BaseAccessory } from "#accessories/base-accessory";
@@ -33,6 +38,23 @@ import { describe } from "#util/describe";
 /** All pending writes flush together, so they share one key. */
 const APPLY_KEY = "apply";
 
+/**
+ * `AdaptiveLightingControllerMode.AUTOMATIC`.
+ *
+ * Spelled numerically because the enum is an ambient const enum, which
+ * `verbatimModuleSyntax` forbids reaching into at runtime — the same reason
+ * `HAPStatus` appears as -70402 in the base accessory.
+ *
+ * hap-nodejs recommends MANUAL mode for lights that run transitions on the
+ * device, which this one does. AUTOMATIC is chosen anyway: it drives the
+ * schedule by calling the ColorTemperature SET handler once a minute, which
+ * costs a single command and flows through the same coalescing and throttling
+ * as any other write. MANUAL would mean re-implementing the transition curve,
+ * its brightness adjustment and its notification thresholds by hand, for one
+ * command a minute we are already able to absorb.
+ */
+const ADAPTIVE_LIGHTING_AUTOMATIC = 1;
+
 type Pending = {
   on?: boolean;
   level?: number;
@@ -44,6 +66,7 @@ type Pending = {
 export class LightAccessory extends BaseAccessory {
   readonly #service: Service;
   #pending: Pending = {};
+  #adaptiveLighting: AdaptiveLightingController | undefined;
 
   constructor(
     platform: ZigbeePlatform,
@@ -95,11 +118,57 @@ export class LightAccessory extends BaseAccessory {
         .onSet((value) => this.#writeSaturation(value));
     }
 
+    this.#configureAdaptiveLighting();
+
     this.track(
       this.platform.state.subscribe(this.view.key, (change) => {
         this.#onStateChange(change);
       }),
     );
+  }
+
+  /**
+   * Offer Apple's Adaptive Lighting, which drifts colour temperature warm
+   * through the evening on its own.
+   *
+   * HomeKit only accepts it on a Lightbulb that has both Brightness and
+   * ColorTemperature, which is exactly what the cluster-driven discovery
+   * derives for a colour-temperature-capable light — so nothing extra needs
+   * detecting here.
+   */
+  #configureAdaptiveLighting(): void {
+    if (!this.platform.config.adaptiveLighting) return;
+    if (!this.view.capabilities.has("brightness") || !this.view.miredRange) return;
+
+    this.#adaptiveLighting = new this.platform.api.hap.AdaptiveLightingController(this.#service, {
+      controllerMode: ADAPTIVE_LIGHTING_AUTOMATIC,
+    });
+    this.accessory.configureController(this.#adaptiveLighting);
+  }
+
+  /**
+   * Keep the colour characteristics consistent with each other.
+   *
+   * ColorTemperature and Hue/Saturation describe the same lamp two ways, and
+   * the Adaptive Lighting controller reads both. Writing one has to move the
+   * other, and it must be done with `updateValue` rather than `setValue`: a
+   * `setValue` counts as a write from HomeKit and switches Adaptive Lighting
+   * off, which is precisely what its own schedule would then do to itself
+   * every sixty seconds.
+   */
+  #mirrorColorTemperature(mireds: number): void {
+    if (!this.view.capabilities.has("color")) return;
+    const { hue, saturation } =
+      this.platform.api.hap.ColorUtils.colorTemperatureToHueAndSaturation(mireds);
+    this.#service.updateCharacteristic(this.platform.Characteristic.Hue, hue);
+    this.#service.updateCharacteristic(this.platform.Characteristic.Saturation, saturation);
+  }
+
+  /** The mirror image: choosing a colour parks colour temperature at its lowest. */
+  #parkColorTemperature(): void {
+    const range = this.view.miredRange;
+    if (!range) return;
+    this.#service.updateCharacteristic(this.platform.Characteristic.ColorTemperature, range.min);
   }
 
   protected override get isReadable(): boolean {
@@ -152,7 +221,9 @@ export class LightAccessory extends BaseAccessory {
   }
 
   #writeMireds(value: CharacteristicValue): void {
-    this.#pending.mireds = Math.round(Number(value));
+    const mireds = Math.round(Number(value));
+    this.#pending.mireds = mireds;
+    this.#mirrorColorTemperature(mireds);
     // Colour temperature and colour are the same lamp: asking for one has to
     // cancel a pending request for the other.
     delete this.#pending.hue;
@@ -163,12 +234,14 @@ export class LightAccessory extends BaseAccessory {
   #writeHue(value: CharacteristicValue): void {
     this.#pending.hue = Number(value);
     delete this.#pending.mireds;
+    this.#parkColorTemperature();
     this.#schedule();
   }
 
   #writeSaturation(value: CharacteristicValue): void {
     this.#pending.saturation = Number(value);
     delete this.#pending.mireds;
+    this.#parkColorTemperature();
     this.#schedule();
   }
 

@@ -58,6 +58,7 @@ const zConfig = z.looseObject({
   rtscts: z.boolean().optional(),
   channel: z.number().optional(),
 
+  adaptiveLighting: z.boolean().optional(),
   exposePairingSwitch: z.boolean().optional(),
   permitJoinDuration: z.number().optional(),
   refreshInterval: z.number().optional(),
@@ -82,6 +83,7 @@ export type ZigbeeConfig = {
   baudRate: number;
   rtscts: boolean;
   channel: number;
+  adaptiveLighting: boolean;
   exposePairingSwitch: boolean;
   permitJoinDuration: number;
   refreshInterval: number;
@@ -126,6 +128,7 @@ export const parseConfig = (raw: PlatformConfig): ZigbeeConfig => {
     baudRate: config.baudRate ?? DEFAULT_BAUD_RATE,
     rtscts: config.rtscts ?? true,
     channel: clamped(config.channel, MIN_CHANNEL, MAX_CHANNEL, DEFAULT_CHANNEL),
+    adaptiveLighting: config.adaptiveLighting ?? true,
     exposePairingSwitch: config.exposePairingSwitch ?? true,
     permitJoinDuration: clamped(
       config.permitJoinDuration,

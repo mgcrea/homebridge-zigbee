@@ -319,3 +319,85 @@ describe("Apple's Adaptive Lighting", () => {
     expect(service().getCharacteristic("ColorTemperature").value).toBe(153);
   });
 });
+
+describe("what a read returns between commanding and being told", () => {
+  /**
+   * The Home app confirms a write by reading back. Without recording what we
+   * just commanded, that read returns the pre-command value and the slider
+   * visibly snaps back — 90% to 40% showed 40, then 90, then 40, while the
+   * lamp itself sat correctly at 40 throughout.
+   */
+  it("reads back the brightness just commanded, not the previous one", async () => {
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: true });
+    state.apply(KEY, CLUSTER.level, { currentLevel: 229 }); // 90%
+    expect(service().read("Brightness")).toBe(90);
+
+    service().write("Brightness", 40);
+    await settle();
+
+    // The device has reported nothing yet — this is exactly the blink window.
+    expect(service().read("Brightness")).toBe(40);
+  });
+
+  it("reads back on/off immediately", async () => {
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: true });
+
+    service().write("On", false);
+    await settle();
+
+    expect(service().read("On")).toBe(false);
+  });
+
+  it("reads back a commanded colour temperature, and records the mode with it", async () => {
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: true });
+
+    service().write("ColorTemperature", 300);
+    await settle();
+
+    expect(service().read("ColorTemperature")).toBe(300);
+    // Recording the mode keeps the colorMode guard honest about which colour
+    // representation is currently meaningful.
+    expect(state.readNumber(KEY, CLUSTER.color, "colorMode")).toBe(2);
+  });
+
+  it("records xy and the mode after a colour command", async () => {
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: true });
+
+    service().write("Hue", 120);
+    service().write("Saturation", 100);
+    await settle();
+
+    expect(state.readNumber(KEY, CLUSTER.color, "currentX")).toBeGreaterThan(0);
+    expect(state.readNumber(KEY, CLUSTER.color, "colorMode")).toBe(1);
+  });
+
+  it("leaves the store honest when the device refuses the command", async () => {
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: true });
+    state.apply(KEY, CLUSTER.level, { currentLevel: 229 });
+    endpoint.failNext = true;
+
+    service().write("Brightness", 40);
+    await settle();
+
+    // Nothing was applied, so claiming 40% would be a lie about the hardware.
+    expect(state.readNumber(KEY, CLUSTER.level, "currentLevel")).toBe(229);
+  });
+
+  it("still lets the device's own report win afterwards", async () => {
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: true });
+
+    service().write("Brightness", 40);
+    await settle();
+    expect(service().read("Brightness")).toBe(40);
+
+    // The light settled somewhere slightly different; it is the authority.
+    state.apply(KEY, CLUSTER.level, { currentLevel: 254 });
+    expect(service().read("Brightness")).toBe(100);
+  });
+});

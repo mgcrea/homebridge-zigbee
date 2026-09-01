@@ -268,6 +268,7 @@ export class LightAccessory extends BaseAccessory {
     try {
       if (pending.on === false) {
         await this.endpoint.command("genOnOff", "off", {});
+        this.#confirm(CLUSTER.onOff, { onOff: false });
         return;
       }
 
@@ -275,6 +276,10 @@ export class LightAccessory extends BaseAccessory {
         await this.endpoint.command("lightingColorCtrl", "moveToColorTemp", {
           colortemp: pending.mireds,
           transtime: transition,
+        });
+        this.#confirm(CLUSTER.color, {
+          colorTemperature: pending.mireds,
+          colorMode: COLOR_MODE.colorTemperature,
         });
       } else if (pending.hue !== undefined || pending.saturation !== undefined) {
         // Only one of the two arrived if the user nudged a single slider, so
@@ -284,9 +289,15 @@ export class LightAccessory extends BaseAccessory {
           hue: pending.hue ?? current.hue,
           saturation: pending.saturation ?? current.saturation,
         });
+        const attributes = xyToAttributes(xy);
         await this.endpoint.command("lightingColorCtrl", "moveToColor", {
-          ...xyToAttributes(xy),
+          ...attributes,
           transtime: transition,
+        });
+        this.#confirm(CLUSTER.color, {
+          currentX: attributes.colorx,
+          currentY: attributes.colory,
+          colorMode: COLOR_MODE.xy,
         });
       }
 
@@ -295,8 +306,11 @@ export class LightAccessory extends BaseAccessory {
           level: pending.level,
           transtime: transition,
         });
+        this.#confirm(CLUSTER.level, { currentLevel: pending.level });
+        this.#confirm(CLUSTER.onOff, { onOff: true });
       } else if (pending.on === true) {
         await this.endpoint.command("genOnOff", "on", {});
+        this.#confirm(CLUSTER.onOff, { onOff: true });
       }
     } catch (error) {
       this.platform.log.warn(`${this.displayName} did not accept the change: ${describe(error)}`);
@@ -317,6 +331,23 @@ export class LightAccessory extends BaseAccessory {
   #colorTemperatureIsMeaningful(): boolean {
     const mode = this.platform.state.readNumber(this.view.key, CLUSTER.color, "colorMode");
     return mode === undefined || mode === COLOR_MODE.colorTemperature;
+  }
+
+  /**
+   * Record what a command just asked the light for.
+   *
+   * Without this the store keeps the pre-command value until the device's own
+   * report arrives, and HomeKit reads the *old* value in the meantime. Seen as
+   * a slider dragged from 90% to 40%: the lamp dims correctly, then the Home
+   * app snaps back to 90% for a second or two before settling at 40% — the
+   * lamp never moved, only the number did.
+   *
+   * The device's report still arrives and still wins; this only fills the gap
+   * between commanding a change and being told it happened. It is applied
+   * after the command resolves, so a refused command leaves the store honest.
+   */
+  #confirm(cluster: string, attributes: Readonly<Record<string, unknown>>): void {
+    this.platform.state.apply(this.view.key, cluster, attributes);
   }
 
   /** Like `#readHueSat`, but never throws — the flush path has no HomeKit call to fail. */

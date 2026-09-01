@@ -22,7 +22,7 @@ import type { Models } from "zigbee-herdsman";
 
 import { BaseAccessory } from "#accessories/base-accessory";
 import { CLUSTER, COLOR_MODE } from "#model/capability";
-import type { DeviceView } from "#model/device";
+import type { DeviceView, MiredRange } from "#model/device";
 import type { StateChange } from "#model/state";
 import type { ZigbeePlatform } from "#platform";
 import {
@@ -65,6 +65,19 @@ type Pending = {
 
 export class LightAccessory extends BaseAccessory {
   readonly #service: Service;
+  /**
+   * The colour-temperature bounds the ColorTemperature characteristic was
+   * created with.
+   *
+   * Deliberately captured once rather than read from `view` on each use. A
+   * later rediscovery can produce a *degraded* view — `describeEndpoint`
+   * cannot read `colorCapabilities` from a light that is momentarily
+   * unreachable, and correctly declines to guess — but the characteristic has
+   * already been added and cannot be removed. Reading the bounds from the view
+   * then yielded the 140 mired fallback and HomeKit rejected it: "supplied
+   * illegal value: number 140 exceeded minimum of 153".
+   */
+  readonly #miredRange: MiredRange | undefined;
   #pending: Pending = {};
   #adaptiveLighting: AdaptiveLightingController | undefined;
 
@@ -75,6 +88,7 @@ export class LightAccessory extends BaseAccessory {
     endpoint: Models.Endpoint,
   ) {
     super(platform, accessory, view, endpoint);
+    this.#miredRange = view.miredRange;
 
     const { Service: HapService, Characteristic } = platform;
     this.#service =
@@ -166,7 +180,7 @@ export class LightAccessory extends BaseAccessory {
 
   /** The mirror image: choosing a colour parks colour temperature at its lowest. */
   #parkColorTemperature(): void {
-    const range = this.view.miredRange;
+    const range = this.#miredRange;
     if (!range) return;
     this.#service.updateCharacteristic(this.platform.Characteristic.ColorTemperature, range.min);
   }
@@ -190,7 +204,7 @@ export class LightAccessory extends BaseAccessory {
 
   #readMireds(): number {
     this.assertReadable();
-    const range = this.view.miredRange;
+    const range = this.#miredRange;
     const mireds = this.platform.state.readNumber(this.view.key, CLUSTER.color, "colorTemperature");
     if (mireds === undefined || !range) return range?.min ?? 140;
     return Math.min(range.max, Math.max(range.min, mireds));
@@ -381,7 +395,7 @@ export class LightAccessory extends BaseAccessory {
 
     if (
       (change.changed.has("colorTemperature") || change.changed.has("colorMode")) &&
-      this.view.miredRange &&
+      this.#miredRange &&
       this.#colorTemperatureIsMeaningful()
     ) {
       this.#service.updateCharacteristic(Characteristic.ColorTemperature, this.#readMiredsQuiet());
@@ -401,13 +415,26 @@ export class LightAccessory extends BaseAccessory {
   }
 
   #readMiredsQuiet(): number {
-    const range = this.view.miredRange;
+    const range = this.#miredRange;
     const mireds = this.platform.state.readNumber(this.view.key, CLUSTER.color, "colorTemperature");
     if (mireds === undefined || !range) return range?.min ?? 140;
     return Math.min(range.max, Math.max(range.min, mireds));
   }
 
+  /**
+   * Take a fresh description of the device.
+   *
+   * Capabilities are merged rather than replaced. A rediscovery that ran while
+   * the light was unreachable comes back with fewer capabilities than the
+   * first one found, and letting that through would leave characteristics on
+   * the service with nothing backing them. A light does not stop being able to
+   * do colour because we could not reach it for a moment.
+   */
   update(view: DeviceView): void {
-    this.view = view;
+    this.view = {
+      ...view,
+      capabilities: new Set([...this.view.capabilities, ...view.capabilities]),
+      miredRange: view.miredRange ?? this.view.miredRange,
+    };
   }
 }

@@ -401,3 +401,53 @@ describe("what a read returns between commanding and being told", () => {
     expect(service().read("Brightness")).toBe(100);
   });
 });
+
+describe("a rediscovery that ran while the light was unreachable", () => {
+  /**
+   * describeEndpoint cannot read colorCapabilities from a light that does not
+   * answer, and correctly declines to guess — so it returns a view with fewer
+   * capabilities than the first one. The characteristics are already on the
+   * service by then and cannot be removed, so the accessory must not act on
+   * the downgrade. Seen in the field as HomeKit rejecting a 140 mired update
+   * on a light whose minimum is 153.
+   */
+  const degraded = colourLightView({
+    capabilities: new Set(["onOff", "brightness"]),
+    miredRange: undefined,
+  });
+
+  it("keeps supplying colour temperature within the advertised bounds", () => {
+    const light = build(colourLightView({ miredRange: { min: 153, max: 500 } }));
+    light.update(degraded);
+
+    state.apply(KEY, CLUSTER.color, { colorMode: 2, colorTemperature: 100 });
+
+    const supplied = Number(service().getCharacteristic("ColorTemperature").value);
+    expect(supplied).toBeGreaterThanOrEqual(153);
+    expect(supplied).toBeLessThanOrEqual(500);
+  });
+
+  it("never answers a read below the characteristic's minimum", () => {
+    const light = build(colourLightView({ miredRange: { min: 153, max: 500 } }));
+    light.update(degraded);
+    state.apply(KEY, CLUSTER.onOff, { onOff: true });
+
+    expect(Number(service().read("ColorTemperature"))).toBeGreaterThanOrEqual(153);
+  });
+
+  it("does not forget capabilities it has already exposed", () => {
+    const light = build();
+    light.update(degraded);
+
+    state.apply(KEY, CLUSTER.color, { currentX: 20_000, currentY: 30_000 });
+    expect(service().getCharacteristic("Hue").value).not.toBeNull();
+  });
+
+  it("still takes genuinely new information", () => {
+    const light = build(colourLightView({ miredRange: { min: 153, max: 500 } }));
+    light.update(colourLightView({ name: "Renamed", miredRange: { min: 200, max: 454 } }));
+
+    state.apply(KEY, CLUSTER.color, { colorMode: 2, colorTemperature: 300 });
+    expect(service().getCharacteristic("ColorTemperature").value).toBe(300);
+  });
+});

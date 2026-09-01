@@ -201,6 +201,38 @@ describe("state changes coming back from the radio", () => {
   });
 });
 
+describe("colour temperature vs colour mode", () => {
+  it("ignores the stale colorTemperature a light in xy mode reports", () => {
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: true });
+    state.apply(KEY, CLUSTER.color, { colorMode: 2, colorTemperature: 370 });
+    expect(service().getCharacteristic("ColorTemperature").value).toBe(370);
+
+    // Observed on a real Hue Play: showing full blue, still answering 153 mired
+    // for colorTemperature. Pushed unguarded, HomeKit renders it as cool white.
+    state.apply(KEY, CLUSTER.color, { colorMode: 1, colorTemperature: 153 });
+
+    expect(service().getCharacteristic("ColorTemperature").value).toBe(370);
+  });
+
+  it("resumes trusting it once the light returns to colour-temperature mode", () => {
+    build();
+    state.apply(KEY, CLUSTER.color, { colorMode: 1, colorTemperature: 153 });
+    state.apply(KEY, CLUSTER.color, { colorMode: 2, colorTemperature: 250 });
+
+    expect(service().getCharacteristic("ColorTemperature").value).toBe(250);
+  });
+
+  it("trusts a light that never reports colorMode at all", () => {
+    // A colour-temperature-only bulb has no other representation to confuse it
+    // with, so silence there must not disable the characteristic.
+    build(colourLightView({ capabilities: new Set(["onOff", "colorTemperature"]) }));
+    state.apply(KEY, CLUSTER.color, { colorTemperature: 320 });
+
+    expect(service().getCharacteristic("ColorTemperature").value).toBe(320);
+  });
+});
+
 describe("colour temperature bounds", () => {
   it("clamps the characteristic to what the bulb can actually do", () => {
     build(colourLightView({ miredRange: { min: 153, max: 454 } }));

@@ -15,6 +15,21 @@ export const CLUSTER = {
   color: "lightingColorCtrl",
 } as const;
 
+/**
+ * `lightingColorCtrl.colorMode` (attribute 0x0008) — which of the three colour
+ * representations the light is actually using right now.
+ *
+ * This matters more than it looks. A light in xy mode still answers a read of
+ * `colorTemperature`, with a stale value left over from whenever it was last in
+ * colour-temperature mode. Reporting that to HomeKit shows a blue lamp as cool
+ * white, so every read of one representation has to be gated on this.
+ */
+export const COLOR_MODE = {
+  hueSaturation: 0,
+  xy: 1,
+  colorTemperature: 2,
+} as const;
+
 /** Bit positions in `lightingColorCtrl.colorCapabilities` (attribute 0x400a). */
 const COLOR_CAPABILITY_BIT = {
   hueSaturation: 0,

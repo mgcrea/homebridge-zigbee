@@ -16,7 +16,7 @@ import type { CharacteristicValue, PlatformAccessory, Service } from "homebridge
 import type { Models } from "zigbee-herdsman";
 
 import { BaseAccessory } from "#accessories/base-accessory";
-import { CLUSTER } from "#model/capability";
+import { CLUSTER, COLOR_MODE } from "#model/capability";
 import type { DeviceView } from "#model/device";
 import type { StateChange } from "#model/state";
 import type { ZigbeePlatform } from "#platform";
@@ -230,6 +230,22 @@ export class LightAccessory extends BaseAccessory {
     }
   }
 
+  /**
+   * Whether the light's `colorTemperature` attribute currently means anything.
+   *
+   * A light in xy mode keeps answering reads of `colorTemperature` with whatever
+   * it held when it was last in colour-temperature mode. Observed on a Hue Play
+   * showing full blue and reporting 153 mired — pushed to HomeKit unguarded,
+   * that renders a blue lamp as cool white.
+   *
+   * A light that never reports `colorMode` at all is trusted, because a
+   * colour-temperature-only bulb has nothing to confuse it with.
+   */
+  #colorTemperatureIsMeaningful(): boolean {
+    const mode = this.platform.state.readNumber(this.view.key, CLUSTER.color, "colorMode");
+    return mode === undefined || mode === COLOR_MODE.colorTemperature;
+  }
+
   /** Like `#readHueSat`, but never throws — the flush path has no HomeKit call to fail. */
   #currentHueSat(): { hue: number; saturation: number } {
     const x = this.platform.state.readNumber(this.view.key, CLUSTER.color, "currentX");
@@ -259,14 +275,20 @@ export class LightAccessory extends BaseAccessory {
 
     if (change.cluster !== CLUSTER.color) return;
 
-    if (change.changed.has("colorTemperature") && this.view.miredRange) {
+    if (
+      (change.changed.has("colorTemperature") || change.changed.has("colorMode")) &&
+      this.view.miredRange &&
+      this.#colorTemperatureIsMeaningful()
+    ) {
       this.#service.updateCharacteristic(Characteristic.ColorTemperature, this.#readMiredsQuiet());
     }
 
     // Both axes come from the same xy pair, so either one moving refreshes both.
     if (
       this.view.capabilities.has("color") &&
-      (change.changed.has("currentX") || change.changed.has("currentY"))
+      (change.changed.has("currentX") ||
+        change.changed.has("currentY") ||
+        change.changed.has("colorMode"))
     ) {
       const { hue, saturation } = this.#currentHueSat();
       this.#service.updateCharacteristic(Characteristic.Hue, hue);

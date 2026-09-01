@@ -90,6 +90,9 @@ export const configureReporting = async (
   await bindThen(endpoint, coordinator, log, CLUSTER.color, async () => {
     await endpoint.configureReporting("lightingColorCtrl", [
       { attribute: "colorTemperature", ...INTERVALS, reportableChange: 1 },
+      // Without this, a colourTemperature report cannot be told apart from the
+      // stale value a light in xy mode reports for the same attribute.
+      { attribute: "colorMode", ...INTERVALS, reportableChange: 0 },
       // xy is uint16, so a change of 256 is roughly 0.4% of the axis — enough
       // to notice a real colour change without reporting on sensor noise.
       { attribute: "currentX", ...INTERVALS, reportableChange: 256 },
@@ -122,7 +125,12 @@ export const refresh = async (endpoint: Models.Endpoint, log: Logging): Promise<
   await attempt(
     CLUSTER.color,
     async () =>
-      await endpoint.read("lightingColorCtrl", ["colorTemperature", "currentX", "currentY"]),
+      await endpoint.read("lightingColorCtrl", [
+        "colorMode",
+        "colorTemperature",
+        "currentX",
+        "currentY",
+      ]),
   );
 };
 

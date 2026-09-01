@@ -55,7 +55,8 @@
     "dev:homebridge": "homebridge -D -U ./.homebridge -P . --strict-plugin-resolution",
     "test": "pnpm run lint && pnpm run check && pnpm run spec && pnpm run format:check",
     "release": "release-it",
-    "prepublishOnly": "pnpm run test && pnpm run build"
+    "prepublishOnly": "pnpm run test && pnpm run build",
+    "control": "tsx scripts/control.ts"
   },
   "dependencies": {
     "zigbee-herdsman": "^10.9.1",

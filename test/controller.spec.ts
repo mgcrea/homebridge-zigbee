@@ -114,3 +114,51 @@ describe("opening the coordinator", () => {
     }).toThrow(NetworkResetError);
   });
 });
+
+/**
+ * Mirrors the production `releasePort` helper, which is not exported.
+ *
+ * herdsman's Controller.stop() runs an unguarded backup() before it reaches
+ * adapter.stop(), and backup() throws on an adapter that never finished
+ * starting — so the port was left open and every retry hit "Cannot lock port".
+ * backup() only touches the adapter when backupPath is set, so clearing it
+ * lets stop() complete.
+ */
+class FakeController {
+  stopped = false;
+  options: { backupPath?: string | undefined } = { backupPath: "/state/backup.json" };
+
+  async stop(): Promise<void> {
+    await Promise.resolve();
+    // Mirrors the real stop(): the backup step throws while backupPath is set,
+    // and adapter.stop() is never reached.
+    if (this.options.backupPath !== undefined) {
+      throw new Error("backup failed: adapter not started");
+    }
+    this.stopped = true;
+  }
+}
+
+const releasePortOf = async (controller: FakeController): Promise<void> => {
+  try {
+    const internals = controller as unknown as { options?: { backupPath?: string | undefined } };
+    if (internals.options) internals.options.backupPath = undefined;
+    await controller.stop();
+  } catch {
+    // swallowed and logged in production
+  }
+};
+
+describe("releasing the port after a failed start", () => {
+  it("reaches adapter.stop() by defusing the unguarded backup", async () => {
+    const controller = new FakeController();
+    await releasePortOf(controller);
+    expect(controller.stopped).toBe(true);
+  });
+
+  it("would NOT have released it without that step", async () => {
+    const controller = new FakeController();
+    await controller.stop().catch(() => undefined);
+    expect(controller.stopped).toBe(false);
+  });
+});

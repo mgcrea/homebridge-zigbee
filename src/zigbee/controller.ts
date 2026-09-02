@@ -81,24 +81,56 @@ export const openController = async (
   try {
     result = await controller.start();
   } catch (error) {
-    // Release the serial port before giving up on this attempt.
-    //
-    // `start()` opens the port and *then* does the Spinel handshake, so a
-    // handshake timeout leaves the port open inside a controller nobody holds a
-    // reference to. Every retry after that fails with "Cannot lock port", and
-    // the plugin locks itself out of its own radio until Homebridge restarts —
-    // which is exactly what the retry loop exists to avoid.
-    try {
-      await controller.stop();
-    } catch {
-      // Nothing useful to add: the port is being abandoned either way.
-    }
+    await releasePort(controller, log);
     throw error;
   }
 
   log.info(`Coordinator ${result} the network on channel ${config.channel}.`);
 
   return { controller, result };
+};
+
+/**
+ * Close the serial port after a failed start.
+ *
+ * `start()` opens the port and *then* talks to the chip, so any failure past
+ * that point — a Spinel timeout, an EZSP `HOST_FATAL_ERROR` — leaves the port
+ * open inside a controller nobody holds a reference to. Every retry then fails
+ * with "Cannot lock port" and the plugin has locked itself out of its own
+ * radio until Homebridge is restarted by hand, which is precisely what the
+ * retry loop exists to prevent.
+ *
+ * `stop()` alone does not fix it, and the reason is worth recording.
+ * herdsman's `Controller.stop()` guards `touchlink.stop()` and `permitJoin(0)`
+ * in try/catch, but not the `backup()` that follows them — and `backup()` asks
+ * the adapter for its network state, which throws on an adapter that never
+ * finished starting. That exception escapes `stop()` *before* it reaches
+ * `adapter.stop()`, so the port is never closed.
+ *
+ * `backup()` skips the adapter entirely when `backupPath` is unset, so
+ * clearing it lets `stop()` run to completion. `options` is private only to
+ * TypeScript, not at runtime, hence the cast. It is a reach past the type and
+ * it is deliberately confined to this one path: the backup being skipped is
+ * one that could not have been written anyway, since the adapter it would have
+ * read from is the thing that just failed.
+ */
+const releasePort = async (controller: Controller, log: Logging): Promise<void> => {
+  try {
+    // Defuse the unguarded backup() inside stop().
+    const internals = controller as unknown as { options?: { backupPath?: string | undefined } };
+    if (internals.options) internals.options.backupPath = undefined;
+
+    await controller.stop();
+  } catch (error) {
+    // Now genuinely unrecoverable: the port stays locked until the process
+    // restarts. Say so plainly rather than letting the retry loop spin
+    // forever against a lock it can never win.
+    log.error(
+      `Could not release ${describe(error)} — the serial port may stay locked. ` +
+        "If every retry now reports 'Cannot lock port', restart Homebridge: the port is held " +
+        "by this process and only a restart will free it.",
+    );
+  }
 };
 
 /**

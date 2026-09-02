@@ -167,11 +167,16 @@ export const configureReporting = async (
  * all the time; polling it would not get an answer, and would shorten its
  * battery life while failing.
  */
-export const refresh = async (endpoint: Models.Endpoint, log: Logging): Promise<void> => {
+export const refresh = async (endpoint: Models.Endpoint, log: Logging): Promise<boolean> => {
+  let reached = false;
+  let attempted = false;
+
   const attempt = async (cluster: string, read: () => Promise<unknown>): Promise<void> => {
     if (!endpoint.supportsInputCluster(cluster)) return;
+    attempted = true;
     try {
       await read();
+      reached = true;
     } catch (error) {
       log.debug(
         `Refresh of ${cluster} on ${endpoint.deviceIeeeAddress} failed: ${describe(error)}`,
@@ -191,6 +196,9 @@ export const refresh = async (endpoint: Models.Endpoint, log: Logging): Promise<
         "currentY",
       ]),
   );
+
+  // Nothing to read is not a failure to reach the device.
+  return attempted ? reached : true;
 };
 
 /** Mains-powered devices are the only ones safe to poll. */

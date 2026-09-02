@@ -31,6 +31,9 @@ type AnyAccessory = LightAccessory | OutletAccessory;
 /** The subtype the pairing switch is registered under. */
 const PAIRING_UUID_SEED = "zigbee-pairing";
 
+/** Never call a device stale sooner than this, however short the poll interval. */
+const MIN_STALE_AFTER_S = 900;
+
 /**
  * Dynamic platform: opens one Zigbee coordinator, mirrors the devices paired to
  * it into HomeKit, and keeps them in step from the attribute reports those
@@ -93,6 +96,19 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
 
   get controller(): Controller | undefined {
     return this.#controller;
+  }
+
+  /**
+   * How quiet a mains-powered device may go before it reads as unreachable.
+   *
+   * Three refresh cycles: reporting is configured to speak at least hourly and
+   * the refresh reads every cycle on top, so a healthy mains device is heard
+   * every cycle. Missing three in a row is not a slow device, it is a gone one.
+   * The floor keeps a very short configured interval from making HomeKit
+   * flicker on one dropped frame.
+   */
+  get staleAfterMs(): number {
+    return Math.max(this.config.refreshInterval * 3, MIN_STALE_AFTER_S) * 1000;
   }
 
   /** Homebridge replays every cached accessory here before launch completes. */

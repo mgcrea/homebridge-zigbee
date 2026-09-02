@@ -202,6 +202,8 @@ export const createFakePlatform = (
     log: overrides.log ?? createFakeLog(),
     state: overrides.state ?? new StateStore(),
     controller: undefined,
+    // Mirrors the real platform: three refresh cycles, floored at 15 minutes.
+    staleAfterMs: 15 * 60 * 1000,
     config: {
       name: "Zigbee",
       port: "/dev/ttyACM0",

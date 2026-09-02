@@ -9,6 +9,9 @@ import { refresh } from "#zigbee/reporting";
 /** HAP refuses a SerialNumber longer than this, and drops the whole accessory. */
 const MAX_SERIAL_LENGTH = 64;
 
+/** Missed polls before a device is worth mentioning in the log. */
+const MISSES_BEFORE_WARNING = 3;
+
 /**
  * What every Zigbee accessory has in common.
  *
@@ -20,6 +23,8 @@ export abstract class BaseAccessory {
   protected readonly queue: DeviceQueue;
   readonly #unsubscribes: (() => void)[] = [];
   #disposed = false;
+  /** Consecutive failed refreshes; drives the warning, not the freshness check. */
+  #missedRefreshes = 0;
 
   constructor(
     protected readonly platform: ZigbeePlatform,
@@ -51,9 +56,38 @@ export abstract class BaseAccessory {
    */
   async refreshFromRadio(): Promise<void> {
     if (this.#disposed) return;
-    await this.queue.run(async () => {
-      await refresh(this.endpoint, this.platform.log);
-    });
+
+    const reached = await this.queue.run(
+      async () => await refresh(this.endpoint, this.platform.log),
+    );
+    this.#noteRefresh(reached);
+  }
+
+  /**
+   * Say when a device stops answering, once — and when it comes back.
+   *
+   * Individual read failures are logged at debug, which is off by default, so
+   * a device that had quietly stopped answering every poll produced no visible
+   * output at all. Announcing the transition rather than every failure keeps a
+   * long outage from becoming thousands of identical lines.
+   */
+  #noteRefresh(reached: boolean): void {
+    if (reached) {
+      if (this.#missedRefreshes >= MISSES_BEFORE_WARNING) {
+        this.platform.log.info(`${this.displayName} is responding again.`);
+      }
+      this.#missedRefreshes = 0;
+      return;
+    }
+
+    this.#missedRefreshes += 1;
+    if (this.#missedRefreshes === MISSES_BEFORE_WARNING) {
+      this.platform.log.warn(
+        `${this.displayName} has not answered ${MISSES_BEFORE_WARNING} polls in a row. ` +
+          "It will show as unresponsive in the Home app until it does. This is usually range: " +
+          "a mains-powered device between it and the coordinator will extend the mesh.",
+      );
+    }
   }
 
   get disposed(): boolean {
@@ -70,8 +104,27 @@ export abstract class BaseAccessory {
    */
   protected abstract get isReadable(): boolean;
 
+  /**
+   * Whether what we hold is recent enough to answer with.
+   *
+   * A mains-powered device that has said nothing for hours is not idle, it is
+   * unreachable — and answering with the values it last reported is a
+   * confident wrong answer about the house. Both lights sat silent for twelve
+   * hours while HomeKit cheerfully showed yesterday's brightness, and the only
+   * way to discover it was to read the logs.
+   *
+   * Battery devices are exempt. They sleep for hours by design and are never
+   * polled, so silence says nothing about them.
+   */
+  protected get isFresh(): boolean {
+    if (!this.view.mainsPowered) return true;
+
+    const age = this.platform.state.ageMs(this.view.key);
+    return age !== undefined && age <= this.platform.staleAfterMs;
+  }
+
   protected assertReadable(): void {
-    if (!this.isReadable) {
+    if (!this.isReadable || !this.isFresh) {
       // -70402 is `HAPStatus.SERVICE_COMMUNICATION_FAILURE`. Spelled
       // numerically because the enum is an ambient const enum, which
       // `verbatimModuleSyntax` forbids reaching into at runtime.

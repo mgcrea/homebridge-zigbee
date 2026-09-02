@@ -29,6 +29,14 @@ type Listener = (change: StateChange) => void;
 export class StateStore {
   readonly #values = new Map<StateKey, Map<string, Map<string, unknown>>>();
   readonly #listeners = new Map<StateKey, Set<Listener>>();
+  /**
+   * When each endpoint was last heard from at all.
+   *
+   * Deliberately separate from the values. A light that faithfully reports the
+   * same brightness every minute changes nothing, so tracking liveness by
+   * "when did a value last move" would call a perfectly healthy device stale.
+   */
+  readonly #lastHeard = new Map<StateKey, number>();
 
   /**
    * Merge an attribute payload in, and tell subscribers what actually moved.
@@ -38,6 +46,9 @@ export class StateStore {
    * and passing those through would push a HomeKit update per report.
    */
   apply(key: StateKey, cluster: string, attributes: Readonly<Record<string, unknown>>): boolean {
+    // Before anything else: we heard from it, whatever it said.
+    this.#lastHeard.set(key, Date.now());
+
     let clusters = this.#values.get(key);
     if (!clusters) {
       clusters = new Map();
@@ -69,6 +80,12 @@ export class StateStore {
   /** Whether anything at all has been heard from this endpoint yet. */
   isKnown(key: StateKey): boolean {
     return this.#values.has(key);
+  }
+
+  /** How long since anything was heard from this endpoint, or undefined if never. */
+  ageMs(key: StateKey, now: number = Date.now()): number | undefined {
+    const heard = this.#lastHeard.get(key);
+    return heard === undefined ? undefined : now - heard;
   }
 
   read(key: StateKey, cluster: string, attribute: string): unknown {
@@ -112,10 +129,12 @@ export class StateStore {
   forget(key: StateKey): void {
     this.#values.delete(key);
     this.#listeners.delete(key);
+    this.#lastHeard.delete(key);
   }
 
   clear(): void {
     this.#values.clear();
     this.#listeners.clear();
+    this.#lastHeard.clear();
   }
 }

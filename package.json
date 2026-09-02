@@ -1,7 +1,7 @@
 {
   "name": "@mgcrea/homebridge-zigbee",
   "displayName": "Zigbee",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Homebridge plugin that drives a Zigbee coordinator directly, exposing lights and outlets in HomeKit without a vendor bridge",
   "author": "Olivier Louvignes <olivier@mgcrea.io>",
   "repository": {

@@ -148,12 +148,19 @@ export class FakeEndpoint {
   readonly ID = 1;
   readonly deviceIeeeAddress = "0x00178801020304";
   failNext = false;
+  /** A specific error to throw once, for assertions about how it is reported. */
+  failWith: Error | undefined;
 
   async command(
     cluster: string,
     command: string,
     payload: Record<string, unknown>,
   ): Promise<undefined> {
+    if (this.failWith) {
+      const error = this.failWith;
+      this.failWith = undefined;
+      throw error;
+    }
     if (this.failNext) {
       this.failNext = false;
       throw new Error("device did not respond");

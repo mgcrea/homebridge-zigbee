@@ -264,6 +264,52 @@ describe("a device that refuses a command", () => {
 
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining("did not accept"));
   });
+
+  it("says what failed without pasting the whole herdsman error", async () => {
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: true });
+    endpoint.failWith = new Error(
+      'ZCL command 0x001788010cb97916/11 genOnOff.off({}, {"timeout":10000,' +
+        '"disableResponse":false,"disableRecovery":false}) failed ' +
+        '({"target":30636,"apsFrame":{"profileId":260,"clusterId":6}} timed out after 10000ms)',
+    );
+
+    service().write("On", false);
+    await settle();
+
+    const warning = String(log.warn.mock.calls.at(-1)?.[0]);
+    expect(warning).toContain("genOnOff.off got no answer within 10s");
+    expect(warning).not.toContain("apsFrame");
+    expect(warning.length).toBeLessThan(120);
+  });
+
+  it("puts the Home app back in step with the light", async () => {
+    // HomeKit takes the write handler returning as confirmation, so a command
+    // the radio never delivered leaves the tile showing a state the lamp is
+    // not in — and nothing is coming to correct it.
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: true });
+    state.apply(KEY, CLUSTER.level, { currentLevel: 229 });
+    endpoint.failNext = true;
+
+    service().write("On", false);
+    await settle();
+
+    expect(service().getCharacteristic("On").value).toBe(true);
+    expect(service().getCharacteristic("Brightness").value).toBe(90);
+  });
+
+  it("leaves a light it has never heard from alone", async () => {
+    // Nothing to put back: pushing a fabricated "off" here is the confident
+    // wrong answer the No Response path exists to avoid.
+    build();
+    endpoint.failNext = true;
+
+    service().write("On", true);
+    await settle();
+
+    expect(service().getCharacteristic("On").value).toBeNull();
+  });
 });
 
 describe("Apple's Adaptive Lighting", () => {
@@ -418,7 +464,7 @@ describe("a rediscovery that ran while the light was unreachable", () => {
 
   it("keeps supplying colour temperature within the advertised bounds", () => {
     const light = build(colourLightView({ miredRange: { min: 153, max: 500 } }));
-    light.update(degraded);
+    light.update(degraded, endpoint as unknown as Models.Endpoint);
 
     state.apply(KEY, CLUSTER.color, { colorMode: 2, colorTemperature: 100 });
 
@@ -429,7 +475,7 @@ describe("a rediscovery that ran while the light was unreachable", () => {
 
   it("never answers a read below the characteristic's minimum", () => {
     const light = build(colourLightView({ miredRange: { min: 153, max: 500 } }));
-    light.update(degraded);
+    light.update(degraded, endpoint as unknown as Models.Endpoint);
     state.apply(KEY, CLUSTER.onOff, { onOff: true });
 
     expect(Number(service().read("ColorTemperature"))).toBeGreaterThanOrEqual(153);
@@ -437,7 +483,7 @@ describe("a rediscovery that ran while the light was unreachable", () => {
 
   it("does not forget capabilities it has already exposed", () => {
     const light = build();
-    light.update(degraded);
+    light.update(degraded, endpoint as unknown as Models.Endpoint);
 
     state.apply(KEY, CLUSTER.color, { currentX: 20_000, currentY: 30_000 });
     expect(service().getCharacteristic("Hue").value).not.toBeNull();
@@ -445,7 +491,10 @@ describe("a rediscovery that ran while the light was unreachable", () => {
 
   it("still takes genuinely new information", () => {
     const light = build(colourLightView({ miredRange: { min: 153, max: 500 } }));
-    light.update(colourLightView({ name: "Renamed", miredRange: { min: 200, max: 454 } }));
+    light.update(
+      colourLightView({ name: "Renamed", miredRange: { min: 200, max: 454 } }),
+      endpoint as unknown as Models.Endpoint,
+    );
 
     state.apply(KEY, CLUSTER.color, { colorMode: 2, colorTemperature: 300 });
     expect(service().getCharacteristic("ColorTemperature").value).toBe(300);

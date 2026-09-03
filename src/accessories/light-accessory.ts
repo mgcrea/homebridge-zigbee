@@ -33,7 +33,6 @@ import {
   xyToAttributes,
   xyToHueSat,
 } from "#util/color";
-import { describe } from "#util/describe";
 
 /** All pending writes flush together, so they share one key. */
 const APPLY_KEY = "apply";
@@ -327,7 +326,7 @@ export class LightAccessory extends BaseAccessory {
         this.#confirm(CLUSTER.onOff, { onOff: true });
       }
     } catch (error) {
-      this.platform.log.warn(`${this.displayName} did not accept the change: ${describe(error)}`);
+      this.reportCommandFailure("did not accept the change", error);
     }
   }
 
@@ -430,11 +429,47 @@ export class LightAccessory extends BaseAccessory {
    * the service with nothing backing them. A light does not stop being able to
    * do colour because we could not reach it for a moment.
    */
-  update(view: DeviceView): void {
+  update(view: DeviceView, endpoint: Models.Endpoint): void {
     this.view = {
       ...view,
       capabilities: new Set([...this.view.capabilities, ...view.capabilities]),
       miredRange: view.miredRange ?? this.view.miredRange,
     };
+    this.adoptEndpoint(endpoint);
+  }
+
+  /**
+   * Every characteristic, straight from the store.
+   *
+   * `#onStateChange` updates only what a report said had moved, which is right
+   * for the reporting path and wrong here: a failed command leaves HomeKit
+   * holding a value nothing in the store ever agreed with, and there is no
+   * report coming to correct it.
+   */
+  protected override publishFromStore(): void {
+    if (!this.isReadable) return;
+    const { Characteristic } = this.platform;
+
+    this.#service.updateCharacteristic(
+      Characteristic.On,
+      this.platform.state.readBoolean(this.view.key, CLUSTER.onOff, "onOff") ?? false,
+    );
+
+    if (this.view.capabilities.has("brightness")) {
+      const level = this.platform.state.readNumber(this.view.key, CLUSTER.level, "currentLevel");
+      if (level !== undefined) {
+        this.#service.updateCharacteristic(Characteristic.Brightness, levelToPercent(level));
+      }
+    }
+
+    if (this.#miredRange && this.#colorTemperatureIsMeaningful()) {
+      this.#service.updateCharacteristic(Characteristic.ColorTemperature, this.#readMiredsQuiet());
+    }
+
+    if (this.view.capabilities.has("color")) {
+      const { hue, saturation } = this.#currentHueSat();
+      this.#service.updateCharacteristic(Characteristic.Hue, hue);
+      this.#service.updateCharacteristic(Characteristic.Saturation, saturation);
+    }
   }
 }

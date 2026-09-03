@@ -41,12 +41,11 @@ let accessory: FakeAccessory;
 
 const build = (v: DeviceView = view()): void => {
   const platform = createFakePlatform({ log: createFakeLog(), state });
-  new LightAccessory(
-    platform,
-    accessory as unknown as PlatformAccessory,
+  const endpoint = new FakeEndpoint() as unknown as Models.Endpoint;
+  new LightAccessory(platform, accessory as unknown as PlatformAccessory, v, endpoint).update(
     v,
-    new FakeEndpoint() as unknown as Models.Endpoint,
-  ).update(v);
+    endpoint,
+  );
 };
 
 const service = () => {

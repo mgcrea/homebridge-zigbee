@@ -53,6 +53,22 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
   readonly #accessories = new Map<string, AnyAccessory>();
   /** Endpoint state key to accessory UUID, so a report is routed in one hop. */
   readonly #byKey = new Map<string, string>();
+  /**
+   * Endpoint state keys whose reporting is already arranged.
+   *
+   * Discovery runs again on every coordinator reconnect, and re-arming
+   * reporting there is both pointless and actively harmful. Pointless because
+   * the configuration lives in the *device's* binding table, aimed at a
+   * coordinator whose address has not changed. Harmful because it is five
+   * round trips per endpoint against an adapter that takes one request at a
+   * time, so every command the user issues in the first minute after a
+   * reconnect queues behind them — which is exactly how a reconnect at 05:47
+   * turns into lights that "were a bit laggy initially".
+   *
+   * A power cycle *does* lose it on Hue bulbs, and that is what `deviceAnnounce`
+   * and `#rearm` are for.
+   */
+  readonly #armed = new Set<string>();
 
   #supervisor: ControllerSupervisor | undefined;
   #controller: Controller | undefined;
@@ -248,8 +264,11 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
 
         this.#adopt(uuid, view, endpoint);
 
-        if (coordinator) {
-          await configureReporting(endpoint, coordinator, this.log);
+        if (coordinator && !this.#armed.has(view.key)) {
+          const outcome = await configureReporting(endpoint, coordinator, this.log);
+          // An endpoint that arranged nothing at all was unreachable, not
+          // unwilling; leaving it unmarked lets the next discovery try again.
+          if (outcome.configured.length > 0) this.#armed.add(view.key);
         }
         // Populate state before HomeKit can ask, so the first read is a real
         // value rather than "No Response".
@@ -263,7 +282,11 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
   #adopt(uuid: string, view: DeviceView, endpoint: Models.Endpoint): void {
     const existing = this.#accessories.get(uuid);
     if (existing) {
-      existing.update(view);
+      // The endpoint matters as much as the view. herdsman rebuilds its device
+      // objects when the controller is reopened, so an accessory that kept the
+      // one it was constructed with is holding a stale handle onto a network
+      // that has since been re-entered.
+      existing.update(view, endpoint);
       return;
     }
 
@@ -302,7 +325,12 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
       if (uuid === pairingUuid && this.config.exposePairingSwitch) continue;
 
       this.log.info(`Removing ${accessory.displayName}, which is no longer paired.`);
-      this.#accessories.get(uuid)?.dispose();
+      const gone = this.#accessories.get(uuid);
+      if (gone) {
+        this.#armed.delete(gone.key);
+        this.#byKey.delete(gone.key);
+        gone.dispose();
+      }
       this.#accessories.delete(uuid);
       this.#cached.delete(uuid);
       this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
@@ -310,19 +338,23 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
   }
 
   #registerPairingSwitch(): void {
-    const uuid = this.api.hap.uuid.generate(PAIRING_UUID_SEED);
-
     if (!this.config.exposePairingSwitch) return;
 
-    const cached = this.#cached.get(uuid);
-    const accessory = cached ?? new this.api.platformAccessory("Zigbee Pairing", uuid);
-    this.#pairing = new PairingSwitch(this, accessory);
+    // Reached again on every reconnect. Building a second PairingSwitch over
+    // the same accessory would replace the handlers hap-nodejs already holds,
+    // and it says so in the log each time it happens.
+    if (!this.#pairing) {
+      const uuid = this.api.hap.uuid.generate(PAIRING_UUID_SEED);
+      const cached = this.#cached.get(uuid);
+      const accessory = cached ?? new this.api.platformAccessory("Zigbee Pairing", uuid);
+      this.#pairing = new PairingSwitch(this, accessory);
 
-    if (cached) {
-      this.api.updatePlatformAccessories([accessory]);
-    } else {
-      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
-      this.#cached.set(uuid, accessory);
+      if (cached) {
+        this.api.updatePlatformAccessories([accessory]);
+      } else {
+        this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+        this.#cached.set(uuid, accessory);
+      }
     }
 
     // The window may already be open if the bridge restarted while it was.
@@ -335,7 +367,12 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
 
     for (const endpoint of device.endpoints) {
       if (endpoint.getInputClusters().length === 0) continue;
-      await configureReporting(endpoint, coordinator, this.log);
+
+      const key = `${device.ieeeAddr}/${endpoint.ID}`;
+      const outcome = await configureReporting(endpoint, coordinator, this.log);
+      if (outcome.configured.length > 0) this.#armed.add(key);
+      else this.#armed.delete(key);
+
       await refresh(endpoint, this.log);
     }
   }

@@ -4,6 +4,7 @@ import type { Models } from "zigbee-herdsman";
 import type { DeviceView } from "#model/device";
 import { DeviceQueue } from "#model/queue";
 import type { ZigbeePlatform } from "#platform";
+import { describeCommandFailure } from "#util/describe";
 import { refresh } from "#zigbee/reporting";
 
 /** HAP refuses a SerialNumber longer than this, and drops the whole accessory. */
@@ -30,7 +31,7 @@ export abstract class BaseAccessory {
     protected readonly platform: ZigbeePlatform,
     protected readonly accessory: PlatformAccessory,
     protected view: DeviceView,
-    protected readonly endpoint: Models.Endpoint,
+    protected endpoint: Models.Endpoint,
   ) {
     this.queue = new DeviceQueue();
   }
@@ -84,8 +85,10 @@ export abstract class BaseAccessory {
     if (this.#missedRefreshes === MISSES_BEFORE_WARNING) {
       this.platform.log.warn(
         `${this.displayName} has not answered ${MISSES_BEFORE_WARNING} polls in a row. ` +
-          "It will show as unresponsive in the Home app until it does. This is usually range: " +
-          "a mains-powered device between it and the coordinator will extend the mesh.",
+          "It will show as unresponsive in the Home app until it does. Check that it still has " +
+          "power first — a lamp switched off at the wall looks exactly like this. If it is " +
+          "powered, it is out of range, and a mains-powered device between it and the " +
+          "coordinator will extend the mesh.",
       );
     }
   }
@@ -103,6 +106,35 @@ export abstract class BaseAccessory {
    * second is visibly an absence of one.
    */
   protected abstract get isReadable(): boolean;
+
+  /**
+   * Push every characteristic back from the store.
+   *
+   * Called when a command failed, and for one specific reason. HomeKit sets a
+   * characteristic to the requested value the moment the user acts on it, and
+   * the write handler returning is taken as confirmation. If the radio command
+   * then fails, nothing ever contradicts that: the lamp stays on, and the Home
+   * app goes on showing it off, indefinitely. Writing the store's values back
+   * puts the tile in front of the user back in step with the house.
+   */
+  protected abstract publishFromStore(): void;
+
+  /**
+   * Report a command that the device did not carry out, and undo the optimism.
+   *
+   * The summary is deliberately short; the full herdsman text carries the APS
+   * frame and every option the command was sent with, which belongs at debug.
+   */
+  protected reportCommandFailure(action: string, error: unknown): void {
+    this.platform.log.warn(`${this.displayName} ${action}: ${describeCommandFailure(error)}.`);
+    this.platform.log.debug(`${this.displayName} ${action}, in full:`, error);
+    this.publishFromStore();
+  }
+
+  /** Re-point the accessory at a freshly resolved endpoint. */
+  protected adoptEndpoint(endpoint: Models.Endpoint): void {
+    this.endpoint = endpoint;
+  }
 
   /**
    * Whether what we hold is recent enough to answer with.

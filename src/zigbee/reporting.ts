@@ -82,11 +82,17 @@ const report = async (log: Logging, what: string, run: () => Promise<void>): Pro
   }
 };
 
+/** What a `configureReporting` pass managed to arrange. */
+export type ReportingOutcome = {
+  configured: readonly string[];
+  refused: readonly string[];
+};
+
 export const configureReporting = async (
   endpoint: Models.Endpoint,
   coordinator: Models.Endpoint,
   log: Logging,
-): Promise<void> => {
+): Promise<ReportingOutcome> => {
   const configured: string[] = [];
   const refused: string[] = [];
   const note = (name: string, ok: boolean): void => {
@@ -158,6 +164,8 @@ export const configureReporting = async (
   } else {
     log.debug(`${endpoint.deviceIeeeAddress}: reporting on ${configured.join(", ")}.`);
   }
+
+  return { configured, refused };
 };
 
 /**

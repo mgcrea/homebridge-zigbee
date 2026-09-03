@@ -13,7 +13,6 @@ import { CLUSTER } from "#model/capability";
 import type { DeviceView } from "#model/device";
 import type { StateChange } from "#model/state";
 import type { ZigbeePlatform } from "#platform";
-import { describe } from "#util/describe";
 
 const APPLY_KEY = "apply";
 
@@ -64,8 +63,13 @@ export class OutletAccessory extends BaseAccessory {
       if (on === undefined) return;
       try {
         await this.endpoint.command("genOnOff", on ? "on" : "off", {});
+        // Record what the command asked for, so a read landing before the
+        // device's own report does not hand HomeKit the pre-command value
+        // back and make the tile flick to its old position. The report still
+        // arrives and still wins; this only covers the gap.
+        this.platform.state.apply(this.view.key, CLUSTER.onOff, { onOff: on });
       } catch (error) {
-        this.platform.log.warn(`${this.displayName} did not switch: ${describe(error)}`);
+        this.reportCommandFailure("did not switch", error);
       }
     });
   }
@@ -78,7 +82,16 @@ export class OutletAccessory extends BaseAccessory {
     );
   }
 
-  update(view: DeviceView): void {
+  update(view: DeviceView, endpoint: Models.Endpoint): void {
     this.view = view;
+    this.adoptEndpoint(endpoint);
+  }
+
+  protected override publishFromStore(): void {
+    if (!this.isReadable) return;
+    this.#service.updateCharacteristic(
+      this.platform.Characteristic.On,
+      this.platform.state.readBoolean(this.view.key, CLUSTER.onOff, "onOff") ?? false,
+    );
   }
 }

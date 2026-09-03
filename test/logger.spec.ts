@@ -88,3 +88,35 @@ describe("real problems", () => {
     expect(log.warn).toHaveBeenCalledWith("[controller] Device did not respond");
   });
 });
+
+describe("herdsman's info level", () => {
+  /**
+   * Almost everything herdsman logs at info is per-frame bookkeeping, so the
+   * whole level goes to debug. These two lines are not bookkeeping: they
+   * describe the coordinator changing identity, which is the situation the
+   * reset guard exists for. Swallowing them left an operator with no account
+   * of why every device had gone quiet.
+   */
+  it("keeps a coordinator address change visible", () => {
+    install().info("Coordinator address changed, updating to '0x00124b0029ab1234'", "zh:c");
+
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining("address changed"));
+    expect(log.debug).not.toHaveBeenCalled();
+  });
+
+  it("keeps a channel mismatch visible", () => {
+    install().info(
+      "Configured channel '15' does not match adapter channel '25', changing channel",
+      "zh:c",
+    );
+
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining("does not match"));
+  });
+
+  it("still demotes the rest of it", () => {
+    install().info("Received Zdo response", "zh:controller");
+
+    expect(log.info).not.toHaveBeenCalled();
+    expect(log.debug).toHaveBeenCalled();
+  });
+});

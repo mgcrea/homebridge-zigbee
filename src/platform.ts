@@ -378,9 +378,7 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
     // reached it: the name is only used when the accessory is constructed, and
     // a cached one is not. Renaming in the Home app still wins, because that
     // changes the config the user would have to change back.
-    if (this.config.devices.some((device) => device.name && device.ieee === view.ieee)) {
-      accessory.displayName = view.name;
-    }
+    if (overrideFor(this.config, view.ieee)?.name) accessory.displayName = view.name;
 
     const instance = view.isLight
       ? new LightAccessory(this, accessory, view, endpoint)

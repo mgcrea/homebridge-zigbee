@@ -51,17 +51,51 @@ It prints the application type and version, for example
   "platform": "Zigbee",
   "port": "/dev/serial/by-id/usb-Nabu_Casa_ZBT-2_XXXXXXXX-if00",
   "adapter": "zoh",
-  "baudRate": 460800,
-  "rtscts": true,
   "channel": 15
 }
 ```
 
-Every other option has a working default; see `config.schema.json` for the full list.
+`port` is the only required option. Everything else has a working default.
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `port` | — | Path to the coordinator. Use the stable `/dev/serial/by-id/` path: `/dev/ttyACM0` renumbers across reboots and after any USB hiccup. |
+| `adapter` | `zoh` | `zoh`, `ember`, `ezsp`, `zstack`, `deconz`, `zboss` or `zigate`. Match the **firmware**, not the stick — see above. |
+| `baudRate` | detected | Leave unset. zigbee-herdsman knows the right rate per adapter (460800 for a ZBT-2, 115200 for a Z-Stack stick, 38400 for a ConBee), and setting it wrong stops the port opening at all. |
+| `rtscts` | detected | Same: leave unset unless your firmware needs flow control forced one way. |
+| `channel` | `15` | The 802.15.4 channel to form the network on. **Changing it after devices are paired strands them.** |
+| `adaptiveLighting` | `true` | Offer Apple's Adaptive Lighting on lights that can do both dimming and colour temperature. |
+| `exposePairingSwitch` | `true` | Show the *Zigbee Pairing* switch in the Home app. With it off there is no way to open the network while Homebridge is running. |
+| `permitJoinDuration` | `120` | How long the pairing window stays open, in seconds. Capped at 254 by the Zigbee specification. |
+| `refreshInterval` | `300` | How often mains-powered devices are re-read, in seconds. A safety net for lights that refused to report changes on their own; battery devices are never polled. |
+| `transitionTime` | `0.4` | How long a light takes to fade to a new brightness or colour, in seconds. `0` snaps. |
+| `allowNetworkReset` | `false` | Leave it off. See *Network state* below. |
+| `debug` | `false` | Log every Zigbee frame in both directions. Very noisy. |
+| `devices` | `[]` | Per-device overrides, below. |
 
 `channel` is worth a thought. Zigbee shares the 2.4GHz band with Wi-Fi, and channels 15, 20 and
-25 sit in the gaps between Wi-Fi 1, 6 and 11. **Changing it after devices are paired strands
-them.**
+25 sit in the gaps between Wi-Fi 1, 6 and 11.
+
+### Per-device settings
+
+```json
+{
+  "devices": [
+    { "ieee": "0x0017880102030405", "name": "Kitchen Ceiling" },
+    { "ieee": "0x00158d0001020304", "exclude": true }
+  ]
+}
+```
+
+| Field | What it does |
+| --- | --- |
+| `ieee` | The device's address. Matched case-insensitively, with or without the `0x`. It appears in the log when the device joins, in the accessory's Serial Number in the Home app, and in `pnpm diagnose`. |
+| `name` | Overrides the name the accessory is given. Renaming in the Home app afterwards always wins — that is a decision you made more recently. |
+| `exclude` | Keep the device out of HomeKit entirely. |
+
+A row that is not usable — an empty one, which the Config UI creates the moment you press *Add* —
+is dropped with a warning naming the row and the field. The rest of the configuration is
+unaffected.
 
 ## Pairing
 
@@ -190,13 +224,29 @@ cluster that decided it.
 answering. This is deliberate: showing "Off" for a device that has not answered is a confident
 wrong answer, and "No Response" is visibly an absence of one.
 
-After three unanswered attempts the plugin says so in the log, once, and stops sending to that
-device until it answers again — it keeps polling it, which is how it notices the device is back,
-but no commands go out meanwhile. That matters because the adapter runs one transaction at a
-time: every send to an absent device holds the radio for a ten-second timeout, and everything
-else in the house waits behind it. A lamp on a switched-off relay with Adaptive Lighting enabled
-would otherwise produce a failed send every minute, all night. A device that *answers* and
-refuses a command is unaffected — only silence counts.
+After three unanswered attempts the plugin says so in the log, once, and stops spending radio on
+that device. That matters because the adapter runs one transaction at a time: every send to an
+absent device holds the radio for a ten-second timeout, and everything else in the house waits
+behind it. A lamp on a switched-off relay with Adaptive Lighting enabled would otherwise produce
+a failed send every minute, all night.
+
+Three things still happen for a device in that state, and each is a way back:
+
+- **Tapping its tile still reaches the radio.** A press is the best probe there is, and if the
+  lamp has power again it answers at once — no waiting for the next poll.
+- **It is still polled, on a widening schedule**: the next cycle, then every second, fourth and
+  eighth. A device whose reporting configuration did not survive its power cycle will never speak
+  first, so the plugin has to keep asking.
+- **Anything heard from it ends the outage immediately**, including an unsolicited report or an
+  announce after a power cycle.
+
+Only what the *automations* send — Adaptive Lighting's minute-by-minute colour temperature — is
+dropped, and only until the device is heard from again. A device that *answers* and refuses a
+command is unaffected: only silence counts.
+
+Adaptive Lighting also costs nothing at all for a light that is simply switched off. The colour
+temperature is held and applied by the command that next turns the light on, which is where it
+was going to be needed anyway.
 
 **A light changed at the wall does not update in HomeKit.** Its attribute reporting did not take.
 The plugin re-arms reporting whenever a device re-announces itself, so power-cycling the bulb

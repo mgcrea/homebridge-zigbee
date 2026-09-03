@@ -62,7 +62,10 @@ export class OutletAccessory extends BaseAccessory {
     this.queue.coalesce(APPLY_KEY, async () => {
       const on = this.#desired;
       if (on === undefined) return;
-      if (this.declineWhileUnreachable("the change")) return;
+      // Deliberately not declined while the device is silent. Nothing here is
+      // automated — every write is a person pressing the tile — and that press
+      // is the best probe there is: it costs one timeout, and if the socket is
+      // back it answers straight away rather than waiting out a poll interval.
       try {
         await this.endpoint.command("genOnOff", on ? "on" : "off", {});
         // Record what the command asked for, so a read landing before the

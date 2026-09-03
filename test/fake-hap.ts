@@ -16,7 +16,7 @@ export class FakeCharacteristic {
   value: unknown = null;
   props: Record<string, unknown> = {};
   getHandler: (() => unknown) | undefined;
-  setHandler: ((value: unknown) => unknown) | undefined;
+  setHandler: ((value: unknown, context?: unknown) => unknown) | undefined;
 
   constructor(readonly name: string) {}
 
@@ -24,7 +24,7 @@ export class FakeCharacteristic {
     this.getHandler = handler;
     return this;
   }
-  onSet(handler: (value: unknown) => unknown): this {
+  onSet(handler: (value: unknown, context?: unknown) => unknown): this {
     this.setHandler = handler;
     return this;
   }
@@ -67,9 +67,15 @@ export class FakeService {
     const characteristic = this.getCharacteristic(name);
     return characteristic.getHandler ? characteristic.getHandler() : characteristic.value;
   }
-  /** Drive a write the way HomeKit would. */
-  write(name: string, value: unknown): unknown {
-    return this.getCharacteristic(name).setHandler?.(value);
+  /**
+   * Drive a write the way HomeKit would.
+   *
+   * The context matters: hap-nodejs tags the writes Adaptive Lighting makes on
+   * its own schedule with `{ controller }`, and that tag is the only thing
+   * separating them from a person tapping the tile.
+   */
+  write(name: string, value: unknown, context?: unknown): unknown {
+    return this.getCharacteristic(name).setHandler?.(value, context);
   }
 }
 
@@ -91,6 +97,11 @@ export class FakeAccessory {
 
   configureController(controller: unknown): void {
     this.controllers.push(controller);
+  }
+
+  removeController(controller: unknown): void {
+    const index = this.controllers.indexOf(controller);
+    if (index >= 0) this.controllers.splice(index, 1);
   }
 
   getService(type: string): FakeService | undefined {

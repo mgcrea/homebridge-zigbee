@@ -500,3 +500,198 @@ describe("a rediscovery that ran while the light was unreachable", () => {
     expect(service().getCharacteristic("ColorTemperature").value).toBe(300);
   });
 });
+
+describe("colour temperature asked for while the light is off", () => {
+  /**
+   * Adaptive Lighting drives colour temperature once a minute whether or not
+   * the light is on — hap-nodejs never looks at `On` before calling the SET
+   * handler. Every one of those was a radio command into a dark lamp, and on a
+   * lamp switched off at a relay it was a ten-second timeout that the whole
+   * house queued behind.
+   */
+  it("sends nothing, but still mirrors so the Home app is right", async () => {
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: false });
+
+    service().write("ColorTemperature", 370);
+    await settle();
+
+    expect(endpoint.commands).toHaveLength(0);
+    expect(service().getCharacteristic("Hue").value).toBe(37);
+    expect(service().getCharacteristic("Saturation").value).toBe(42);
+  });
+
+  it("applies the held value on the way up, before the light comes on", async () => {
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: false });
+
+    service().write("ColorTemperature", 370);
+    await settle();
+    service().write("On", true);
+    await settle();
+
+    // Colour first: a Hue bulb accepts it while off and applies it on the way
+    // up, so the lamp never flashes its previous temperature.
+    expect(endpoint.commands.map((c) => c.command)).toEqual(["moveToColorTemp", "on"]);
+    expect(endpoint.commands[0]?.payload["colortemp"]).toBe(370);
+  });
+
+  it("rides out with a brightness write too", async () => {
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: false });
+
+    service().write("ColorTemperature", 370);
+    await settle();
+    service().write("Brightness", 40);
+    await settle();
+
+    expect(endpoint.commands.map((c) => c.command)).toEqual([
+      "moveToColorTemp",
+      "moveToLevelWithOnOff",
+    ]);
+  });
+
+  it("survives an off in between, because the lamp is still going to come back", async () => {
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: false });
+
+    service().write("ColorTemperature", 370);
+    await settle();
+    service().write("On", false);
+    await settle();
+    service().write("On", true);
+    await settle();
+
+    expect(endpoint.commands.map((c) => c.command)).toEqual(["off", "moveToColorTemp", "on"]);
+  });
+
+  it("is dropped when a colour is chosen instead", async () => {
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: false });
+
+    service().write("ColorTemperature", 370);
+    await settle();
+    service().write("Hue", 200);
+    service().write("On", true);
+    await settle();
+
+    expect(endpoint.commands.map((c) => c.command)).toEqual(["moveToColor", "on"]);
+  });
+
+  it("holds it for a light nothing has ever been heard from", async () => {
+    // No evidence it is on, and a fabricated guess here costs a full timeout.
+    build();
+
+    service().write("ColorTemperature", 370);
+    await settle();
+
+    expect(endpoint.commands).toHaveLength(0);
+  });
+
+  it("holds it for a mains light that has gone quiet for hours", async () => {
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: true });
+    // Past the staleness floor: what the store says about it stopped meaning
+    // anything a while ago.
+    await vi.advanceTimersByTimeAsync(20 * 60_000);
+
+    service().write("ColorTemperature", 370);
+    await settle();
+
+    expect(endpoint.commands).toHaveLength(0);
+  });
+});
+
+describe("brightness zero", () => {
+  it("turns the light off rather than claiming it is on", async () => {
+    // moveToLevelWithOnOff at level 0 switches the lamp off. The store used to
+    // record `onOff: true` anyway, so Siri's "set the lamp to 0%" left a tile
+    // showing a light that was on and dark.
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: true });
+    state.apply(KEY, CLUSTER.level, { currentLevel: 229 });
+
+    service().write("Brightness", 0);
+    await settle();
+
+    expect(endpoint.commands[0]?.payload["level"]).toBe(0);
+    expect(service().read("On")).toBe(false);
+  });
+
+  it("is floored at 1 when the same batch also asked for on", async () => {
+    // "On, as dim as it goes" — sending 0 would do the opposite.
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: false });
+
+    service().write("On", true);
+    service().write("Brightness", 0);
+    await settle();
+
+    expect(endpoint.commands[0]?.payload["level"]).toBe(1);
+    expect(service().read("On")).toBe(true);
+  });
+
+  it("does not cancel an off that arrived in the same window", async () => {
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: true });
+
+    service().write("On", false);
+    service().write("Brightness", 80);
+    await settle();
+
+    expect(endpoint.commands.map((c) => c.command)).toEqual(["off"]);
+  });
+});
+
+describe("switching from colour to colour temperature", () => {
+  it("does not push the old colour back over the mirror", async () => {
+    // `#confirm` records the new colorMode, and the mode moving used to make
+    // the state listener recompute Hue and Saturation from the xy pair the
+    // lamp held *before* — so a blue lamp set to warm white went briefly blue
+    // again in the Home app.
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: true });
+    state.apply(KEY, CLUSTER.color, { colorMode: 1, currentX: 10_000, currentY: 5_000 });
+
+    service().write("ColorTemperature", 370);
+    await settle();
+
+    expect(service().getCharacteristic("Hue").value).toBe(37);
+    expect(service().getCharacteristic("Saturation").value).toBe(42);
+  });
+
+  it("still follows the lamp back to a colour it chose itself", async () => {
+    build();
+    state.apply(KEY, CLUSTER.onOff, { onOff: true });
+    state.apply(KEY, CLUSTER.color, { colorMode: 2, colorTemperature: 370 });
+    service().getCharacteristic("Hue").updateValue("sentinel");
+
+    state.apply(KEY, CLUSTER.color, { colorMode: 1, currentX: 20_000, currentY: 30_000 });
+
+    expect(service().getCharacteristic("Hue").value).not.toBe("sentinel");
+  });
+
+  it("answers a read with the parked value while the lamp is in xy mode", () => {
+    // The lamp goes on answering `colorTemperature` with whatever it held when
+    // it was last in colour-temperature mode. Reported straight through, a
+    // blue lamp read as cool white.
+    build(colourLightView({ miredRange: { min: 153, max: 500 } }));
+    state.apply(KEY, CLUSTER.onOff, { onOff: true });
+    state.apply(KEY, CLUSTER.color, { colorMode: 1, colorTemperature: 370 });
+
+    expect(service().read("ColorTemperature")).toBe(153);
+  });
+});
+
+describe("disposal", () => {
+  it("gives back the Adaptive Lighting controller", () => {
+    // It holds a timer that fires once a minute and a reference to the
+    // service, so an accessory unregistered mid-transition went on driving a
+    // light the plugin no longer has.
+    const light = build();
+    expect(accessory.controllers).toHaveLength(1);
+
+    light.dispose();
+    expect(accessory.controllers).toHaveLength(0);
+  });
+});

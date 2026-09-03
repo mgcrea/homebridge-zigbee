@@ -22,7 +22,7 @@ import type { Models } from "zigbee-herdsman";
 
 import { BaseAccessory } from "#accessories/base-accessory";
 import { CLUSTER, COLOR_MODE } from "#model/capability";
-import type { DeviceView, MiredRange } from "#model/device";
+import { HOMEKIT_MIRED_MIN, type DeviceView, type MiredRange } from "#model/device";
 import type { StateChange } from "#model/state";
 import type { ZigbeePlatform } from "#platform";
 import {
@@ -61,7 +61,35 @@ type Pending = {
   mireds?: number;
   hue?: number;
   saturation?: number;
+  /**
+   * Whether every write in this batch came from Adaptive Lighting rather than
+   * from a person.
+   *
+   * The distinction decides what happens when the device has stopped
+   * answering. An automated write to a silent lamp is pure waste — the
+   * schedule will be back in sixty seconds regardless — but a user's tap is
+   * the best probe there is, and the moment it succeeds the lamp is back.
+   * Declining those left a tile that did nothing until the next poll.
+   */
+  automated?: boolean;
 };
+
+/**
+ * hap-nodejs types the SET handler's context as `any`; nothing here needs more
+ * than "some value that may or may not be an object".
+ */
+type WriteContext = unknown;
+
+/**
+ * Whether a characteristic write came from the Adaptive Lighting controller.
+ *
+ * hap-nodejs tags the writes its own schedule makes with `{ controller }` and
+ * passes the context straight through to the SET handler, which is the only
+ * thing separating them from a person tapping the tile. This is the same test
+ * hap-nodejs applies internally.
+ */
+const isAutomated = (context: WriteContext): boolean =>
+  typeof context === "object" && context !== null && "controller" in context;
 
 export class LightAccessory extends BaseAccessory {
   readonly #service: Service;
@@ -79,6 +107,21 @@ export class LightAccessory extends BaseAccessory {
    */
   readonly #miredRange: MiredRange | undefined;
   #pending: Pending = {};
+  /**
+   * A colour temperature asked for while the light was off.
+   *
+   * Adaptive Lighting drives colour temperature once a minute whether or not
+   * the light is on, and hap-nodejs never checks `On` before calling the SET
+   * handler. Sending those is pointless — the lamp is dark — and on a lamp that
+   * is off at a relay it is worse than pointless, because the adapter runs one
+   * transaction at a time and every other device queues behind the timeout.
+   *
+   * So the value is kept here instead and folded into whichever command next
+   * turns the light on, where it costs nothing: colour already precedes `on`,
+   * so the lamp comes up at the right temperature rather than flashing its
+   * previous one on the way.
+   */
+  #deferredMireds: number | undefined;
   #adaptiveLighting: AdaptiveLightingController | undefined;
 
   constructor(
@@ -100,13 +143,13 @@ export class LightAccessory extends BaseAccessory {
     this.#service
       .getCharacteristic(Characteristic.On)
       .onGet(() => this.#readOn())
-      .onSet((value) => this.#writeOn(value));
+      .onSet((value, context) => this.#writeOn(value, context));
 
     if (view.capabilities.has("brightness")) {
       this.#service
         .getCharacteristic(Characteristic.Brightness)
         .onGet(() => this.#readBrightness())
-        .onSet((value) => this.#writeBrightness(value));
+        .onSet((value, context) => this.#writeBrightness(value, context));
     }
 
     if (view.miredRange) {
@@ -117,19 +160,19 @@ export class LightAccessory extends BaseAccessory {
         // from the bulb's physical bounds already clamped into HomeKit's.
         .setProps({ minValue: view.miredRange.min, maxValue: view.miredRange.max })
         .onGet(() => this.#readMireds())
-        .onSet((value) => this.#writeMireds(value));
+        .onSet((value, context) => this.#writeMireds(value, context));
     }
 
     if (view.capabilities.has("color")) {
       this.#service
         .getCharacteristic(Characteristic.Hue)
         .onGet(() => this.#readHueSat().hue)
-        .onSet((value) => this.#writeHue(value));
+        .onSet((value, context) => this.#writeHue(value, context));
 
       this.#service
         .getCharacteristic(Characteristic.Saturation)
         .onGet(() => this.#readHueSat().saturation)
-        .onSet((value) => this.#writeSaturation(value));
+        .onSet((value, context) => this.#writeSaturation(value, context));
     }
 
     this.#configureAdaptiveLighting();
@@ -204,10 +247,15 @@ export class LightAccessory extends BaseAccessory {
 
   #readMireds(): number {
     this.assertReadable();
-    const range = this.#miredRange;
-    const mireds = this.platform.state.readNumber(this.view.key, CLUSTER.color, "colorTemperature");
-    if (mireds === undefined || !range) return range?.min ?? 140;
-    return Math.min(range.max, Math.max(range.min, mireds));
+    // A light in xy mode goes on answering reads of `colorTemperature` with
+    // whatever it held when it was last in colour-temperature mode. The other
+    // two paths already refuse to trust that; this one reported it straight to
+    // the Home app, which showed a blue lamp as cool white. Report the value a
+    // colour write parks the characteristic at instead.
+    if (!this.#colorTemperatureIsMeaningful()) {
+      return this.#miredRange?.min ?? HOMEKIT_MIRED_MIN;
+    }
+    return this.#readMiredsQuiet();
   }
 
   #readHueSat(): { hue: number; saturation: number } {
@@ -220,49 +268,98 @@ export class LightAccessory extends BaseAccessory {
 
   // --------------------------------------------------------------- writes
 
-  #writeOn(value: CharacteristicValue): void {
+  #writeOn(value: CharacteristicValue, context: WriteContext): void {
     this.#pending.on = value === true;
-    this.#schedule();
+    this.#schedule(context);
   }
 
-  #writeBrightness(value: CharacteristicValue): void {
-    this.#pending.level = percentToLevel(Number(value));
-    // HomeKit sends Brightness without On when raising a light from off. The
-    // command used below turns the light on as a side effect, and saying so
+  #writeBrightness(value: CharacteristicValue, context: WriteContext): void {
+    const level = percentToLevel(Number(value));
+    this.#pending.level = level;
+    // HomeKit sends Brightness without On when raising a light from off, and
+    // the command used below turns the light on as a side effect, so saying so
     // here keeps the flush from also sending a redundant `on`.
-    this.#pending.on = true;
-    this.#schedule();
+    //
+    // Brightness *zero* is the opposite request. Claiming `on` for it used to
+    // cancel an `On = false` that arrived in the same coalescing window, so
+    // switching a light off from a scene that also set its brightness turned
+    // it on instead. An explicit off always wins.
+    if (level > 0 && this.#pending.on !== false) this.#pending.on = true;
+    this.#schedule(context);
   }
 
-  #writeMireds(value: CharacteristicValue): void {
+  #writeMireds(value: CharacteristicValue, context: WriteContext): void {
     const mireds = Math.round(Number(value));
-    this.#pending.mireds = mireds;
+    // Mirror regardless of whether anything is sent: Hue and Saturation
+    // describe the same lamp, the Adaptive Lighting controller reads both, and
+    // a deferred value still has to leave the Home app showing the right thing.
     this.#mirrorColorTemperature(mireds);
     // Colour temperature and colour are the same lamp: asking for one has to
     // cancel a pending request for the other.
     delete this.#pending.hue;
     delete this.#pending.saturation;
-    this.#schedule();
+
+    if (!this.#willBeOn(this.#pending)) {
+      // Nothing to light. Hold the value for whichever command turns the lamp
+      // on next, and put nothing on the radio.
+      this.#deferredMireds = mireds;
+      delete this.#pending.mireds;
+      return;
+    }
+
+    this.#pending.mireds = mireds;
+    this.#schedule(context);
   }
 
-  #writeHue(value: CharacteristicValue): void {
+  #writeHue(value: CharacteristicValue, context: WriteContext): void {
     this.#pending.hue = Number(value);
     delete this.#pending.mireds;
+    this.#deferredMireds = undefined;
     this.#parkColorTemperature();
-    this.#schedule();
+    this.#schedule(context);
   }
 
-  #writeSaturation(value: CharacteristicValue): void {
+  #writeSaturation(value: CharacteristicValue, context: WriteContext): void {
     this.#pending.saturation = Number(value);
     delete this.#pending.mireds;
+    this.#deferredMireds = undefined;
     this.#parkColorTemperature();
-    this.#schedule();
+    this.#schedule(context);
   }
 
-  #schedule(): void {
+  /**
+   * Whether the pending batch leaves the light on.
+   *
+   * What it asks for outranks what the store holds, and the store only counts
+   * when it is recent enough to mean anything: a light nothing has been heard
+   * from is treated as off, which is the safe direction — the value is held
+   * rather than spent on a radio timeout, and the next command that does turn
+   * the light on carries it.
+   */
+  #willBeOn(pending: Pending): boolean {
+    if (pending.on !== undefined) return pending.on;
+    if (pending.level !== undefined) return pending.level > 0;
+    if (!this.isFresh) return false;
+    return this.platform.state.readBoolean(this.view.key, CLUSTER.onOff, "onOff") ?? false;
+  }
+
+  #schedule(context: WriteContext): void {
+    // A batch counts as automated only while every write in it was. One tap
+    // from a person makes the whole flush a probe worth spending radio on.
+    this.#pending.automated = (this.#pending.automated ?? true) && isAutomated(context);
+
     this.queue.coalesce(APPLY_KEY, async () => {
       const pending = this.#pending;
       this.#pending = {};
+
+      if (pending.mireds === undefined && this.#willBeOn(pending)) {
+        // A colour temperature held back while the light was off rides out
+        // with the command that turns it on, at no extra cost: `#apply` sends
+        // colour first, so the lamp comes up already at the right temperature.
+        if (this.#deferredMireds !== undefined) pending.mireds = this.#deferredMireds;
+      }
+      if (pending.mireds !== undefined) this.#deferredMireds = undefined;
+
       await this.#apply(pending);
     });
   }
@@ -277,7 +374,11 @@ export class LightAccessory extends BaseAccessory {
    * and switching on, so no separate `on` is needed alongside it.
    */
   async #apply(pending: Pending): Promise<void> {
-    if (this.declineWhileUnreachable("the change")) return;
+    // Only the scheduled writes are declined. A person tapping the tile is the
+    // best probe there is, and the success resets the counter through the same
+    // `noteRadioOutcome` every other command uses — so a lamp whose power came
+    // back answers the first tap rather than waiting out a poll interval.
+    if (pending.automated === true && this.declineWhileUnreachable("the change")) return;
 
     const transition = Math.round(this.platform.config.transitionTime * 10);
     // Only an attempt that actually reached the radio says anything about
@@ -326,13 +427,20 @@ export class LightAccessory extends BaseAccessory {
       }
 
       if (pending.level !== undefined) {
+        // `moveToLevelWithOnOff` at level 0 turns the light *off*, so a batch
+        // that also asked for `on` — HomeKit's way of saying "on, as dim as it
+        // goes" — has to be floored at 1 or it does the opposite.
+        const level = pending.on === true ? Math.max(1, pending.level) : pending.level;
         await this.endpoint.command("genLevelCtrl", "moveToLevelWithOnOff", {
-          level: pending.level,
+          level,
           transtime: transition,
         });
         sent = true;
-        this.#confirm(CLUSTER.level, { currentLevel: pending.level });
-        this.#confirm(CLUSTER.onOff, { onOff: true });
+        this.#confirm(CLUSTER.level, { currentLevel: level });
+        // And when it was not floored, level 0 means the lamp is now off. The
+        // store used to record `onOff: true` regardless, so setting brightness
+        // to zero left the Home app showing a tile that was on.
+        this.#confirm(CLUSTER.onOff, { onOff: level > 0 });
       } else if (pending.on === true) {
         await this.endpoint.command("genOnOff", "on", {});
         sent = true;
@@ -418,16 +526,23 @@ export class LightAccessory extends BaseAccessory {
       this.#service.updateCharacteristic(Characteristic.ColorTemperature, this.#readMiredsQuiet());
     }
 
+    if (!this.view.capabilities.has("color")) return;
+
     // Both axes come from the same xy pair, so either one moving refreshes both.
-    if (
-      this.view.capabilities.has("color") &&
-      (change.changed.has("currentX") ||
-        change.changed.has("currentY") ||
-        change.changed.has("colorMode"))
-    ) {
+    const xyMoved = change.changed.has("currentX") || change.changed.has("currentY");
+    const modeMoved = change.changed.has("colorMode");
+
+    if (xyMoved || (modeMoved && !this.#colorTemperatureIsMeaningful())) {
       const { hue, saturation } = this.#currentHueSat();
       this.#service.updateCharacteristic(Characteristic.Hue, hue);
       this.#service.updateCharacteristic(Characteristic.Saturation, saturation);
+    } else if (modeMoved && this.#miredRange) {
+      // The lamp moved *to* colour temperature. Hue and Saturation still have
+      // to describe it, but the xy pair they would come from is the one it held
+      // before the change — recomputing from that pushed the old colour back
+      // over the mirror `#writeMireds` had just written, so a light going from
+      // blue to warm white briefly turned blue again in the Home app.
+      this.#mirrorColorTemperature(this.#readMiredsQuiet());
     }
   }
 
@@ -454,6 +569,22 @@ export class LightAccessory extends BaseAccessory {
       miredRange: view.miredRange ?? this.view.miredRange,
     };
     this.adoptEndpoint(endpoint);
+  }
+
+  /**
+   * Let go of the Adaptive Lighting controller along with everything else.
+   *
+   * It holds a timer that fires once a minute and a reference back to the
+   * service, so an accessory unregistered while a transition was running went
+   * on driving colour temperature into a light the plugin no longer has.
+   */
+  override dispose(): void {
+    this.#deferredMireds = undefined;
+    if (this.#adaptiveLighting) {
+      this.accessory.removeController(this.#adaptiveLighting);
+      this.#adaptiveLighting = undefined;
+    }
+    super.dispose();
   }
 
   /**

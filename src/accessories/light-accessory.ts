@@ -98,14 +98,26 @@ export class LightAccessory extends BaseAccessory {
    * created with.
    *
    * Deliberately captured once rather than read from `view` on each use. A
-   * later rediscovery can produce a *degraded* view — `describeEndpoint`
+   * later rediscovery can produce a *degraded* view — `probeEndpoint`
    * cannot read `colorCapabilities` from a light that is momentarily
    * unreachable, and correctly declines to guess — but the characteristic has
    * already been added and cannot be removed. Reading the bounds from the view
    * then yielded the 140 mired fallback and HomeKit rejected it: "supplied
    * illegal value: number 140 exceeded minimum of 153".
    */
-  readonly #miredRange: MiredRange | undefined;
+  #miredRange: MiredRange | undefined;
+  /**
+   * Which optional characteristics already have handlers on them.
+   *
+   * `Service.testCharacteristic` is not the guard here, and the reason is worth
+   * recording. `updateCharacteristic` on a characteristic a service does not
+   * have makes hap *add* it, so a Hue update on a light discovered without
+   * colour created a colour wheel with nothing behind it. And a restored
+   * accessory comes back from Homebridge's cache with its characteristics
+   * already present but no handlers at all — the same test, opposite answer.
+   * Only this set knows which ones this instance actually wired.
+   */
+  readonly #wired = new Set<string>();
   #pending: Pending = {};
   /**
    * A colour temperature asked for while the light was off.
@@ -131,28 +143,61 @@ export class LightAccessory extends BaseAccessory {
     endpoint: Models.Endpoint,
   ) {
     super(platform, accessory, view, endpoint);
-    this.#miredRange = view.miredRange;
 
-    const { Service: HapService, Characteristic } = platform;
+    const { Service: HapService } = platform;
     this.#service =
       this.accessory.getService(HapService.Lightbulb) ??
       this.accessory.addService(HapService.Lightbulb, this.displayName);
 
     this.configureInformation();
+    this.#wire();
+    this.#configureAdaptiveLighting();
 
-    this.#service
-      .getCharacteristic(Characteristic.On)
-      .onGet(() => this.#readOn())
-      .onSet((value, context) => this.#writeOn(value, context));
+    this.track(
+      this.platform.state.subscribe(this.view.key, (change) => {
+        this.#onStateChange(change);
+      }),
+    );
+  }
 
-    if (view.capabilities.has("brightness")) {
+  /**
+   * Add the handlers for everything the current view says the light can do.
+   *
+   * Called again on every rediscovery, and each block runs at most once. A
+   * light that was unreachable when it was first found comes back describing
+   * only on/off — `probeEndpoint` cannot read `colorCapabilities` from a
+   * silent bulb and correctly declines to guess — and used to keep that
+   * skeleton for the life of the process, because the wiring only ever happened
+   * in the constructor. Powering the bulb up meant restarting Homebridge to get
+   * its colour controls.
+   */
+  #wire(): void {
+    const { Characteristic } = this.platform;
+    const view = this.view;
+
+    if (!this.#wired.has("onOff")) {
+      this.#wired.add("onOff");
+      this.#service
+        .getCharacteristic(Characteristic.On)
+        .onGet(() => this.#readOn())
+        .onSet((value, context) => this.#writeOn(value, context));
+    }
+
+    if (view.capabilities.has("brightness") && !this.#wired.has("brightness")) {
+      this.#wired.add("brightness");
       this.#service
         .getCharacteristic(Characteristic.Brightness)
         .onGet(() => this.#readBrightness())
         .onSet((value, context) => this.#writeBrightness(value, context));
     }
 
-    if (view.miredRange) {
+    if (view.miredRange && !this.#wired.has("colorTemperature")) {
+      this.#wired.add("colorTemperature");
+      // Captured once. A later rediscovery can produce a *degraded* view, and
+      // reading the bounds from it then yielded the 140 mired fallback, which
+      // HomeKit rejects outright: "supplied illegal value: number 140 exceeded
+      // minimum of 153".
+      this.#miredRange = view.miredRange;
       this.#service
         .getCharacteristic(Characteristic.ColorTemperature)
         // A characteristic whose props sit outside HomeKit's own 140-500 range
@@ -163,7 +208,8 @@ export class LightAccessory extends BaseAccessory {
         .onSet((value, context) => this.#writeMireds(value, context));
     }
 
-    if (view.capabilities.has("color")) {
+    if (view.capabilities.has("color") && !this.#wired.has("color")) {
+      this.#wired.add("color");
       this.#service
         .getCharacteristic(Characteristic.Hue)
         .onGet(() => this.#readHueSat().hue)
@@ -174,14 +220,6 @@ export class LightAccessory extends BaseAccessory {
         .onGet(() => this.#readHueSat().saturation)
         .onSet((value, context) => this.#writeSaturation(value, context));
     }
-
-    this.#configureAdaptiveLighting();
-
-    this.track(
-      this.platform.state.subscribe(this.view.key, (change) => {
-        this.#onStateChange(change);
-      }),
-    );
   }
 
   /**
@@ -194,8 +232,12 @@ export class LightAccessory extends BaseAccessory {
    * detecting here.
    */
   #configureAdaptiveLighting(): void {
+    if (this.#adaptiveLighting) return;
     if (!this.platform.config.adaptiveLighting) return;
-    if (!this.view.capabilities.has("brightness") || !this.view.miredRange) return;
+    // Read from what was actually wired, not from the view: the controller
+    // drives the ColorTemperature and Brightness characteristics directly, so
+    // offering it before their handlers exist would be offering nothing.
+    if (!this.#wired.has("brightness") || !this.#wired.has("colorTemperature")) return;
 
     this.#adaptiveLighting = new this.platform.api.hap.AdaptiveLightingController(this.#service, {
       controllerMode: ADAPTIVE_LIGHTING_AUTOMATIC,
@@ -569,6 +611,11 @@ export class LightAccessory extends BaseAccessory {
       miredRange: view.miredRange ?? this.view.miredRange,
     };
     this.adoptEndpoint(endpoint);
+    // A rediscovery that found *more* than the first one did — the usual case
+    // being a light that was unreachable at startup and has since been powered
+    // up — gets its controls now rather than at the next restart.
+    this.#wire();
+    this.#configureAdaptiveLighting();
   }
 
   /**

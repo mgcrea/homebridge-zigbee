@@ -115,7 +115,10 @@ export const configureReporting = async (
       "currentLevel",
       await report(log, "genLevelCtrl.currentLevel", async () => {
         await endpoint.configureReporting("genLevelCtrl", [
-          { attribute: "currentLevel", ...INTERVALS, reportableChange: 1 },
+          // 3 of 254, roughly 1% of the slider. A reportable change of 1 with
+          // a one-second minimum meant a report per second per light for the
+          // whole of a fade, none of which HomeKit renders differently.
+          { attribute: "currentLevel", ...INTERVALS, reportableChange: 3 },
         ]);
       }),
     );
@@ -126,7 +129,9 @@ export const configureReporting = async (
       "colorTemperature",
       await report(log, "lightingColorCtrl.colorTemperature", async () => {
         await endpoint.configureReporting("lightingColorCtrl", [
-          { attribute: "colorTemperature", ...INTERVALS, reportableChange: 1 },
+          // 5 mired is under the just-noticeable difference across the whole
+          // range a bulb offers, and the same fade argument applies.
+          { attribute: "colorTemperature", ...INTERVALS, reportableChange: 5 },
         ]);
       }),
     );
@@ -226,3 +231,17 @@ export const refresh = async (endpoint: Models.Endpoint, log: Logging): Promise<
 /** Mains-powered devices are the only ones safe to poll. */
 export const isMainsPowered = (device: Models.Device): boolean =>
   device.powerSource === "Mains (single phase)" || device.powerSource === "DC Source";
+
+/**
+ * Whether the device has finished telling herdsman what it is.
+ *
+ * Until it has, its endpoints and clusters are whatever the interview managed
+ * to collect so far, and binding or reading against that is a round trip spent
+ * on an answer that will change. The interview is retried by herdsman on its
+ * own; discovery simply comes back to the device on the next pass.
+ *
+ * Compared as a string because the enum is declared in herdsman's own module
+ * and its members are not reachable from a type-only import.
+ */
+export const isInterviewed = (device: Models.Device): boolean =>
+  String(device.interviewState) === "SUCCESSFUL";

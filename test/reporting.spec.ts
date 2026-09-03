@@ -103,8 +103,9 @@ describe("configureReporting", () => {
     // one is what made the colour cluster's whole request fail.
     expect(byName.get("onOff")?.reportableChange).toBeUndefined();
     expect(byName.get("colorMode")?.reportableChange).toBeUndefined();
-    // Analog types still carry one.
-    expect(byName.get("currentLevel")?.reportableChange).toBe(1);
+    // Analog types still carry one, wide enough that a fade does not become a
+    // report per second per light.
+    expect(byName.get("currentLevel")?.reportableChange).toBe(3);
     expect(byName.get("currentX")?.reportableChange).toBe(256);
   });
 

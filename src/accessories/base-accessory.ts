@@ -14,6 +14,15 @@ const MAX_SERIAL_LENGTH = 64;
 const FAILURES_BEFORE_UNREACHABLE = 3;
 
 /**
+ * How rarely a silent device is probed, at the most.
+ *
+ * Eight cycles is forty minutes at the default interval. Rarer than that and a
+ * lamp whose power came back would sit unresponsive long enough for someone to
+ * go looking for the bug.
+ */
+const MAX_POLL_BACKOFF_CYCLES = 8;
+
+/**
  * What every Zigbee accessory has in common.
  *
  * There is no deep hierarchy below this on purpose: the AccessoryInformation
@@ -30,6 +39,10 @@ export abstract class BaseAccessory {
   #lastFailureAt = 0;
   /** Whether the outage has already been announced, so it is announced once. */
   #announced = false;
+  /** How many poll cycles to sit out before probing a silent device again. */
+  #pollBackoff = 0;
+  /** Cycles sat out so far under the current back-off. */
+  #cyclesSkipped = 0;
 
   constructor(
     protected readonly platform: ZigbeePlatform,
@@ -62,10 +75,31 @@ export abstract class BaseAccessory {
   async refreshFromRadio(): Promise<void> {
     if (this.#disposed) return;
 
-    // Unreachable devices are still polled, deliberately. It costs one
-    // unanswered read per cycle, and it is the only way back: a device whose
+    // An unreachable device is still probed, deliberately: a device whose
     // reporting configuration did not survive its power cycle will never speak
-    // first, so if we stop asking, it stays unreachable for good.
+    // first, so if we stop asking entirely it stays unreachable for good.
+    //
+    // But every probe is a ten-second timeout on a radio that runs one
+    // transaction at a time, so the whole house waits behind each one. The gap
+    // therefore doubles while the silence lasts — one cycle, then two, four and
+    // eight — and collapses the instant anything is heard. A person tapping the
+    // tile is not subject to any of this; that write always goes out, and it is
+    // the faster way back.
+    if (this.unreachable) {
+      if (this.#cyclesSkipped < this.#pollBackoff) {
+        this.#cyclesSkipped += 1;
+        return;
+      }
+      this.#cyclesSkipped = 0;
+      this.#pollBackoff = Math.min(
+        MAX_POLL_BACKOFF_CYCLES,
+        this.#pollBackoff === 0 ? 1 : this.#pollBackoff * 2,
+      );
+    } else {
+      this.#pollBackoff = 0;
+      this.#cyclesSkipped = 0;
+    }
+
     const reached = await this.queue.run(
       async () => await refresh(this.endpoint, this.platform.log),
     );
@@ -147,10 +181,12 @@ export abstract class BaseAccessory {
       this.#announced = true;
       this.platform.log.warn(
         `${this.displayName} has not answered ${FAILURES_BEFORE_UNREACHABLE} attempts in a row. ` +
-          "It will show as unresponsive in the Home app, and nothing further will be sent to it " +
-          "until it answers, so that one absent device does not slow the rest down. The usual " +
-          "cause is that it has lost power — a lamp switched off at the wall or on a relay looks " +
-          "exactly like this — and the next likeliest is that it is out of range.",
+          "It will show as unresponsive in the Home app, automations will stop writing to it, " +
+          "and it will be probed less and less often, so that one absent device does not slow " +
+          "the rest of the house down. Tapping its tile still reaches the radio and is the " +
+          "quickest way to find out it is back. The usual cause is that it has lost power — a " +
+          "lamp switched off at the wall or on a relay looks exactly like this — and the next " +
+          "likeliest is that it is out of range.",
       );
     }
   }

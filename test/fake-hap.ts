@@ -156,15 +156,29 @@ export const createFakeLog = (): FakeLog => ({
 export class FakeEndpoint {
   readonly commands: { cluster: string; command: string; payload: Record<string, unknown> }[] = [];
   readonly reads: { cluster: string; attributes: string[] }[] = [];
-  readonly ID = 1;
-  readonly deviceIeeeAddress = "0x00178801020304";
+  readonly binds: string[] = [];
+  readonly reportings: { cluster: string; records: unknown[] }[] = [];
+  readonly deviceIeeeAddress: string;
+  /** 0x010d, an extended colour light: enough to be exposed as a Lightbulb. */
+  deviceID = 0x010d;
+  /** What `read` answers with, per cluster, when it answers at all. */
+  values: Record<string, Record<string, unknown>> = {};
   failNext = false;
   /** A specific error to throw once, for assertions about how it is reported. */
   failWith: Error | undefined;
   /** An error thrown by every command, for outages that last. */
   failEvery: Error | undefined;
+  /** A device that answers nothing: every read times out, as an absent one does. */
+  readFails = false;
   /** Every command attempt, including the ones made to fail. */
   attempts = 0;
+
+  constructor(
+    readonly ID = 1,
+    ieee = "0x00178801020304",
+  ) {
+    this.deviceIeeeAddress = ieee;
+  }
 
   async command(
     cluster: string,
@@ -188,14 +202,30 @@ export class FakeEndpoint {
 
   async read(cluster: string, attributes: string[]): Promise<Record<string, unknown>> {
     this.reads.push({ cluster, attributes });
-    return await Promise.resolve({});
+    if (this.readFails) {
+      throw new Error(
+        `ZCL command ${this.deviceIeeeAddress}/${this.ID} ${cluster}.read() failed ` +
+          "(timed out after 10000ms)",
+      );
+    }
+    return await Promise.resolve(this.values[cluster] ?? {});
+  }
+
+  async bind(cluster: string): Promise<void> {
+    this.binds.push(cluster);
+    await Promise.resolve();
+  }
+
+  async configureReporting(cluster: string, records: unknown[]): Promise<void> {
+    this.reportings.push({ cluster, records });
+    await Promise.resolve();
   }
 
   supportsInputCluster(): boolean {
     return true;
   }
-  getInputClusters(): unknown[] {
-    return [];
+  getInputClusters(): { name: string }[] {
+    return [{ name: "genOnOff" }, { name: "genLevelCtrl" }, { name: "lightingColorCtrl" }];
   }
 }
 

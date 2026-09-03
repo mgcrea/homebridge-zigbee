@@ -450,7 +450,7 @@ describe("what a read returns between commanding and being told", () => {
 
 describe("a rediscovery that ran while the light was unreachable", () => {
   /**
-   * describeEndpoint cannot read colorCapabilities from a light that does not
+   * probeEndpoint cannot read colorCapabilities from a light that does not
    * answer, and correctly declines to guess — so it returns a view with fewer
    * capabilities than the first one. The characteristics are already on the
    * service by then and cannot be removed, so the accessory must not act on

@@ -13,11 +13,17 @@ import { LightAccessory } from "#accessories/light-accessory";
 import { OutletAccessory } from "#accessories/outlet-accessory";
 import { PairingSwitch } from "#accessories/pairing-switch";
 import { ConfigError, overrideFor, parseConfig, type ZigbeeConfig } from "#config";
-import { describeEndpoint, type DeviceView } from "#model/device";
-import { StateStore } from "#model/state";
+import {
+  type DeviceView,
+  type EndpointProbe,
+  probeEndpoint,
+  storedProbe,
+  viewFrom,
+} from "#model/device";
+import { StateStore, stateKey } from "#model/state";
 import { ControllerSupervisor, NetworkResetError, resolvePaths } from "#zigbee/controller";
 import { installHerdsmanLogger } from "#zigbee/logger";
-import { configureReporting, refresh } from "#zigbee/reporting";
+import { configureReporting, isInterviewed, isMainsPowered } from "#zigbee/reporting";
 import { PLATFORM_NAME, PLUGIN_NAME } from "#settings";
 import { describe } from "#util/describe";
 
@@ -46,8 +52,14 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
   readonly #config: ZigbeeConfig | undefined;
   readonly #cached = new Map<string, PlatformAccessory>();
   readonly #accessories = new Map<string, AnyAccessory>();
-  /** Endpoint state key to accessory UUID, so a report is routed in one hop. */
-  readonly #byKey = new Map<string, string>();
+  /**
+   * Re-arms in flight, by IEEE address.
+   *
+   * A Hue bulb announces itself several times on power-up, and each announce
+   * used to start its own unserialised pass of five binds and a full refresh
+   * against a radio that takes one request at a time.
+   */
+  readonly #rearming = new Map<string, Promise<void>>();
   /**
    * Endpoint state keys whose reporting is already arranged.
    *
@@ -71,7 +83,20 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
   #refreshTimer: NodeJS.Timeout | undefined;
   #shuttingDown = false;
   #discovering: Promise<void> | undefined;
+  #refreshing: Promise<void> | undefined;
   #rediscover = false;
+  /**
+   * Bumped whenever the controller is replaced.
+   *
+   * A discovery pass is a long sequence of awaits against a specific
+   * controller. When the adapter drops halfway through, every remaining
+   * request in that pass is aimed at a herdsman whose device cache has since
+   * been rebuilt — and, worse, the pass would finish by calling `#removeStale`
+   * with a half-filled `seen` set and unregister every accessory it had not
+   * reached yet. Unregistering loses the room and scene assignments the user
+   * made, permanently.
+   */
+  #epoch = 0;
 
   constructor(
     readonly log: Logging,
@@ -159,6 +184,9 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
   }
 
   async #onControllerReady(controller: Controller): Promise<void> {
+    // A pass still running against the previous controller must not finish.
+    this.#epoch += 1;
+
     controller.on("message", (payload) => {
       this.#onMessage(payload);
     });
@@ -182,9 +210,7 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
     controller.on("deviceAnnounce", ({ device }) => {
       // A device that just re-announced has usually been power-cycled, and Hue
       // bulbs lose their reporting configuration when that happens.
-      void this.#rearm(device).catch((error: unknown) => {
-        this.log.warn(`Could not re-arm ${device.ieeeAddr}: ${describe(error)}`);
-      });
+      this.#scheduleRearm(device);
     });
     controller.on("permitJoinChanged", ({ permitted }) => {
       this.#pairing?.setOpen(permitted);
@@ -228,6 +254,12 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
     const controller = this.#controller;
     if (!controller || this.#shuttingDown) return;
 
+    // Everything below is checked against the controller and epoch this pass
+    // started on, after every await.
+    const epoch = this.#epoch;
+    const abandoned = (): boolean =>
+      this.#shuttingDown || this.#epoch !== epoch || this.#controller !== controller;
+
     const coordinator = controller.getDevicesByType("Coordinator")[0]?.getEndpoint(1);
 
     const seen = new Set<string>();
@@ -236,42 +268,85 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
       const override = overrideFor(this.config, device.ieeeAddr);
       if (override?.exclude) continue;
 
+      // Its endpoints and clusters are still whatever the interview has
+      // collected so far, so anything read or bound against them is a round
+      // trip spent on an answer that is about to change. herdsman retries the
+      // interview on its own and the next pass will find it.
+      if (!isInterviewed(device)) {
+        this.log.debug(`${device.ieeeAddr} has not finished its interview; leaving it for now.`);
+        continue;
+      }
+
+      const speakable = isMainsPowered(device);
+
       for (const endpoint of device.endpoints) {
         // An endpoint with no input clusters has nothing to control.
         if (endpoint.getInputClusters().length === 0) continue;
 
+        const key = stateKey(device.ieeeAddr, endpoint.ID);
+        const uuid = this.api.hap.uuid.generate(key);
+
         let view: DeviceView;
-        try {
-          view = await describeEndpoint(device, endpoint, this.log);
-        } catch (error) {
-          this.log.warn(`Could not describe ${device.ieeeAddr}: ${describe(error)}`);
-          continue;
+        let fresh: EndpointProbe | undefined;
+
+        // The probe is the only part of a description that costs radio, and it
+        // does not change for a device that is still the same device — so a
+        // rediscovery of an adopted endpoint spends nothing. Before this, every
+        // reconnect re-read two descriptions per endpoint on top of the binds.
+        const remembered = storedProbe(this.#cached.get(uuid)?.context);
+        if (remembered) {
+          view = viewFrom(device, endpoint, remembered);
+        } else {
+          try {
+            const probed = await probeEndpoint(device, endpoint, this.log);
+            if (abandoned()) return;
+            view = viewFrom(device, endpoint, probed.probe);
+            // A probe taken while the light was unreachable describes the
+            // outage, not the light. Caching that would make a moment's
+            // silence permanent.
+            if (probed.complete) fresh = probed.probe;
+          } catch (error) {
+            this.log.warn(`Could not describe ${device.ieeeAddr}: ${describe(error)}`);
+            continue;
+          }
         }
 
         if (view.capabilities.size === 0) continue;
         if (override?.name) view = { ...view, name: override.name };
 
-        const uuid = this.api.hap.uuid.generate(view.key);
         seen.add(uuid);
+        this.#adopt(uuid, view, endpoint, fresh);
 
-        this.#adopt(uuid, view, endpoint);
+        // Battery devices are asleep almost all the time. Binding and reading
+        // them fails, costs battery on the way, and is contradicted by the
+        // reporting module's own contract — only `#refreshAll` used to honour
+        // it.
+        if (!speakable) continue;
 
         if (coordinator && !this.#armed.has(view.key)) {
           const outcome = await configureReporting(endpoint, coordinator, this.log);
+          if (abandoned()) return;
           // An endpoint that arranged nothing at all was unreachable, not
           // unwilling; leaving it unmarked lets the next discovery try again.
           if (outcome.configured.length > 0) this.#armed.add(view.key);
         }
+
         // Populate state before HomeKit can ask, so the first read is a real
         // value rather than "No Response".
-        await refresh(endpoint, this.log);
+        await this.#accessories.get(uuid)?.refreshFromRadio();
+        if (abandoned()) return;
       }
     }
 
     this.#removeStale(seen);
   }
 
-  #adopt(uuid: string, view: DeviceView, endpoint: Models.Endpoint): void {
+  #adopt(
+    uuid: string,
+    view: DeviceView,
+    endpoint: Models.Endpoint,
+    probe: EndpointProbe | undefined,
+  ): void {
     const existing = this.#accessories.get(uuid);
     if (existing) {
       // The endpoint matters as much as the view. herdsman rebuilds its device
@@ -279,19 +354,20 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
       // one it was constructed with is holding a stale handle onto a network
       // that has since been re-entered.
       existing.update(view, endpoint);
+      if (probe) this.#rememberProbe(uuid, probe);
       return;
     }
 
     const cached = this.#cached.get(uuid);
     const accessory = cached ?? new this.api.platformAccessory(view.name, uuid);
     accessory.context["key"] = view.key;
+    if (probe) accessory.context["probe"] = probe;
 
     const instance = view.isLight
       ? new LightAccessory(this, accessory, view, endpoint)
       : new OutletAccessory(this, accessory, view, endpoint);
 
     this.#accessories.set(uuid, instance);
-    this.#byKey.set(view.key, uuid);
 
     if (cached) {
       this.api.updatePlatformAccessories([accessory]);
@@ -300,6 +376,22 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
       this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
       this.#cached.set(uuid, accessory);
     }
+  }
+
+  /**
+   * Keep the probe with the accessory, so the next start does not repeat it.
+   *
+   * `updatePlatformAccessories` is what makes Homebridge write the context out;
+   * without it the probe would live only until the process ends, which is
+   * exactly the run it needs to survive.
+   */
+  #rememberProbe(uuid: string, probe: EndpointProbe): void {
+    const accessory = this.#cached.get(uuid);
+    if (!accessory) return;
+    if (storedProbe(accessory.context)) return;
+
+    accessory.context["probe"] = probe;
+    this.api.updatePlatformAccessories([accessory]);
   }
 
   /**
@@ -320,7 +412,10 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
       const gone = this.#accessories.get(uuid);
       if (gone) {
         this.#armed.delete(gone.key);
-        this.#byKey.delete(gone.key);
+        // Nothing else will ever read this endpoint's values, and leaving them
+        // behind means a device re-paired later starts from another device's
+        // last known state.
+        this.state.forget(gone.key);
         gone.dispose();
       }
       this.#accessories.delete(uuid);
@@ -353,19 +448,50 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
     this.#pairing.setOpen(this.#controller?.getPermitJoin() ?? false);
   }
 
+  /**
+   * Re-arm a device that has just re-announced itself, once.
+   *
+   * Hue bulbs announce several times on power-up. Each announce used to start
+   * its own pass of five binds and a full refresh, unserialised, against an
+   * adapter that runs one request at a time — so the bulb the user had just
+   * switched on was the last thing the radio got to.
+   */
+  #scheduleRearm(device: Models.Device): void {
+    const ieee = device.ieeeAddr;
+    if (this.#rearming.has(ieee)) return;
+
+    const task = this.#rearm(device)
+      .catch((error: unknown) => {
+        this.log.warn(`Could not re-arm ${ieee}: ${describe(error)}`);
+      })
+      .finally(() => {
+        this.#rearming.delete(ieee);
+      });
+
+    this.#rearming.set(ieee, task);
+  }
+
   async #rearm(device: Models.Device): Promise<void> {
     const coordinator = this.#controller?.getDevicesByType("Coordinator")[0]?.getEndpoint(1);
     if (!coordinator) return;
+    // A sleeping device does not lose its reporting configuration to a power
+    // cycle, because it has no power cycle to lose it to.
+    if (!isMainsPowered(device) || !isInterviewed(device)) return;
+
+    const epoch = this.#epoch;
 
     for (const endpoint of device.endpoints) {
       if (endpoint.getInputClusters().length === 0) continue;
 
-      const key = `${device.ieeeAddr}/${endpoint.ID}`;
+      const key = stateKey(device.ieeeAddr, endpoint.ID);
       const outcome = await configureReporting(endpoint, coordinator, this.log);
+      if (this.#shuttingDown || this.#epoch !== epoch) return;
+
       if (outcome.configured.length > 0) this.#armed.add(key);
       else this.#armed.delete(key);
 
-      await refresh(endpoint, this.log);
+      await this.#accessories.get(this.api.hap.uuid.generate(key))?.refreshFromRadio();
+      if (this.#shuttingDown || this.#epoch !== epoch) return;
     }
   }
 
@@ -375,9 +501,21 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
     if (this.#refreshTimer) return;
 
     const timer = setInterval(() => {
-      void this.#refreshAll().catch((error: unknown) => {
-        this.log.warn(`Refresh cycle failed: ${describe(error)}`);
-      });
+      // A cycle that has not finished is a cycle whose reads are still queued
+      // behind a device that is not answering. Starting a second one behind it
+      // only makes the queue longer.
+      if (this.#refreshing) {
+        this.log.debug("The previous refresh cycle is still running; skipping this one.");
+        return;
+      }
+
+      this.#refreshing = this.#refreshAll()
+        .catch((error: unknown) => {
+          this.log.warn(`Refresh cycle failed: ${describe(error)}`);
+        })
+        .finally(() => {
+          this.#refreshing = undefined;
+        });
     }, this.config.refreshInterval * 1_000);
     timer.unref?.();
     this.#refreshTimer = timer;
@@ -394,9 +532,12 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
     const controller = this.#controller;
     if (!controller || this.#shuttingDown) return;
 
+    const epoch = this.#epoch;
+
     for (const accessory of this.#accessories.values()) {
       if (!accessory.mainsPowered) continue;
       await accessory.refreshFromRadio();
+      if (this.#shuttingDown || this.#epoch !== epoch || this.#controller !== controller) return;
     }
   }
 
@@ -405,6 +546,11 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
 
     if (this.#refreshTimer) clearInterval(this.#refreshTimer);
     this.#refreshTimer = undefined;
+
+    // Both check `#shuttingDown` after every await, so this is a short wait for
+    // the request already on the radio — not for the whole pass. Disposing the
+    // accessories underneath a running pass is what it avoids.
+    await Promise.allSettled([this.#discovering, this.#refreshing, ...this.#rearming.values()]);
 
     for (const accessory of this.#accessories.values()) accessory.dispose();
     this.#accessories.clear();

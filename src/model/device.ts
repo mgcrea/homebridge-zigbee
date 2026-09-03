@@ -11,6 +11,7 @@
  */
 import type { Logging } from "homebridge";
 import type { Models } from "zigbee-herdsman";
+import { z } from "zod";
 
 import type { Capability } from "#model/capability";
 import { capabilitiesFrom, CLUSTER, colorSupportFrom, isLight } from "#model/capability";
@@ -61,16 +62,67 @@ export const clampMiredRange = (
 };
 
 /**
- * Interrogate one endpoint and describe what it can do.
+ * What an endpoint had to be asked, as opposed to what its descriptors already
+ * said.
  *
- * The colour reads are best-effort: a light that will not answer them is still
- * exposed, just without the colour controls it would not have honoured anyway.
+ * Everything else in a `DeviceView` comes from the interview, which herdsman
+ * has already done and stored. These four attributes are the only part that
+ * costs radio, so they are the only part worth remembering across a restart —
+ * and they do not change for a device that is still the same device.
  */
-export const describeEndpoint = async (
+export type EndpointProbe = {
+  version: 1;
+  productLabel: string | undefined;
+  colorCapabilities: number | undefined;
+  colorTempPhysicalMin: number | undefined;
+  colorTempPhysicalMax: number | undefined;
+};
+
+const zProbe = z.object({
+  version: z.literal(1),
+  productLabel: z.string().optional(),
+  colorCapabilities: z.number().optional(),
+  colorTempPhysicalMin: z.number().optional(),
+  colorTempPhysicalMax: z.number().optional(),
+});
+
+/**
+ * A probe carried over from a previous run, or nothing.
+ *
+ * Homebridge round-trips the accessory context through JSON, and a context
+ * written by an older version of this plugin is not this shape — so it is
+ * validated rather than trusted, and a mismatch simply means probing again.
+ */
+export const storedProbe = (context: unknown): EndpointProbe | undefined => {
+  if (typeof context !== "object" || context === null) return undefined;
+  const parsed = zProbe.safeParse((context as Record<string, unknown>)["probe"]);
+  if (!parsed.success) return undefined;
+
+  return {
+    version: 1,
+    productLabel: parsed.data.productLabel,
+    colorCapabilities: parsed.data.colorCapabilities,
+    colorTempPhysicalMin: parsed.data.colorTempPhysicalMin,
+    colorTempPhysicalMax: parsed.data.colorTempPhysicalMax,
+  };
+};
+
+/**
+ * Ask one endpoint the two questions its descriptors cannot answer.
+ *
+ * Both reads are best-effort: a light that will not answer them is still
+ * exposed, just without the colour controls it would not have honoured anyway.
+ * `complete` says whether the answers are worth keeping — a probe taken while
+ * the light was unreachable describes the outage, not the light, and caching
+ * that would make a momentary silence permanent.
+ */
+export const probeEndpoint = async (
   device: Models.Device,
   endpoint: Models.Endpoint,
   log: Logging,
-): Promise<DeviceView> => {
+): Promise<{ probe: EndpointProbe; complete: boolean }> => {
+  let complete = true;
+
   // Optional in the ZCL and absent on plenty of devices, so this is best-effort
   // and never allowed to fail discovery.
   let productLabel: string | undefined;
@@ -79,12 +131,14 @@ export const describeEndpoint = async (
     const value = basic["productLabel"];
     if (typeof value === "string") productLabel = value;
   } catch {
-    // Unsupported attribute; the vendor + device-type fallback covers it.
+    // Unsupported attribute; the vendor + device-type fallback covers it. Not
+    // a reason to withhold the probe: a device that does not implement the
+    // attribute will never implement it.
   }
 
   let colorCapabilities: number | undefined;
-  let physicalMin: number | undefined;
-  let physicalMax: number | undefined;
+  let colorTempPhysicalMin: number | undefined;
+  let colorTempPhysicalMax: number | undefined;
 
   if (endpoint.supportsInputCluster(CLUSTER.color)) {
     try {
@@ -94,9 +148,10 @@ export const describeEndpoint = async (
         "colorTempPhysicalMax",
       ]);
       colorCapabilities = numeric(read["colorCapabilities"]);
-      physicalMin = numeric(read["colorTempPhysicalMin"]);
-      physicalMax = numeric(read["colorTempPhysicalMax"]);
+      colorTempPhysicalMin = numeric(read["colorTempPhysicalMin"]);
+      colorTempPhysicalMax = numeric(read["colorTempPhysicalMax"]);
     } catch (error) {
+      complete = false;
       log.debug(
         `${device.ieeeAddr} would not report its colour capabilities: ${describe(error)}. ` +
           "Colour controls will be omitted for it.",
@@ -104,8 +159,35 @@ export const describeEndpoint = async (
     }
   }
 
+  return {
+    probe: {
+      version: 1,
+      productLabel,
+      colorCapabilities,
+      colorTempPhysicalMin,
+      colorTempPhysicalMax,
+    },
+    complete,
+  };
+};
+
+/**
+ * Describe one endpoint from its descriptors plus a probe.
+ *
+ * Pure: everything it needs is either already in herdsman's database or in the
+ * probe handed to it, so a rediscovery of a device already adopted costs no
+ * radio at all.
+ */
+export const viewFrom = (
+  device: Models.Device,
+  endpoint: Models.Endpoint,
+  probe: EndpointProbe,
+): DeviceView => {
+  const hasBounds =
+    probe.colorTempPhysicalMin !== undefined && probe.colorTempPhysicalMax !== undefined;
+
   const color = endpoint.supportsInputCluster(CLUSTER.color)
-    ? colorSupportFrom(colorCapabilities, physicalMin !== undefined && physicalMax !== undefined)
+    ? colorSupportFrom(probe.colorCapabilities, hasBounds)
     : undefined;
 
   const capabilities = capabilitiesFrom(endpoint, color);
@@ -114,13 +196,13 @@ export const describeEndpoint = async (
     ieee: device.ieeeAddr,
     endpointId: endpoint.ID,
     key: stateKey(device.ieeeAddr, endpoint.ID),
-    name: defaultName(device, endpoint, productLabel),
+    name: defaultName(device, endpoint, probe.productLabel),
     manufacturer: device.manufacturerName?.trim() || "Zigbee",
     model: device.modelID?.trim() || "Unknown",
     firmware: device.softwareBuildID?.trim() || undefined,
     capabilities,
     miredRange: capabilities.has("colorTemperature")
-      ? clampMiredRange(physicalMin, physicalMax)
+      ? clampMiredRange(probe.colorTempPhysicalMin, probe.colorTempPhysicalMax)
       : undefined,
     isLight: isLight(capabilities, endpoint.deviceID),
     mainsPowered: isMainsPowered(device),

@@ -266,3 +266,47 @@ describe("a device that answers but says no", () => {
     ).not.toContain("has not answered");
   });
 });
+
+/** One turn of the platform's periodic refresh, for one accessory. */
+const cycle = async (light: LightAccessory): Promise<void> => {
+  await light.refreshFromRadio();
+  await vi.runOnlyPendingTimersAsync();
+};
+
+describe("polling a device that is not answering", () => {
+  /**
+   * The commit that introduced the outage guard argued for polling every cycle
+   * regardless, on the grounds that it is the only way back. That is right and
+   * it is also expensive: each probe is a ten-second timeout on a radio that
+   * runs one transaction at a time, so with three dead lamps a fifth of the
+   * radio goes on rediscovering the same absence. The gap doubles instead, and
+   * a tap on the tile remains the fast way back.
+   */
+  it("backs off to every second, fourth and eighth cycle while the silence lasts", async () => {
+    const light = build();
+    endpoint.readFails = true;
+
+    // Three unanswered reads is what makes it unreachable in the first place.
+    for (let i = 0; i < 3; i += 1) await cycle(light);
+    const probesBefore = endpoint.reads.length;
+
+    // Fifteen further cycles: probes land on the 1st, then after 1, 2, 4 and 8
+    // skipped ones.
+    for (let i = 0; i < 15; i += 1) await cycle(light);
+
+    expect(endpoint.reads.length - probesBefore).toBe(4);
+  });
+
+  it("goes straight back to every cycle once the device is heard again", async () => {
+    const light = build();
+    endpoint.readFails = true;
+    for (let i = 0; i < 6; i += 1) await cycle(light);
+
+    endpoint.readFails = false;
+    state.apply(KEY, CLUSTER.onOff, { onOff: false });
+    const probesBefore = endpoint.reads.length;
+
+    for (let i = 0; i < 3; i += 1) await cycle(light);
+    expect(endpoint.reads.length - probesBefore).toBe(3);
+  });
+});

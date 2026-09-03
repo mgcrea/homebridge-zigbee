@@ -30,3 +30,16 @@ export const describeCommandFailure = (error: unknown): string => {
   const status = ZCL_STATUS.exec(message)?.[1];
   return status === undefined ? `${command} failed` : `${command} was refused (${status})`;
 };
+
+/**
+ * Whether a failure means "no answer" rather than "no".
+ *
+ * The distinction is what makes it safe to stop sending to a device. A device
+ * that came back with a ZCL status was reached and declined; one that timed out
+ * was not there at all. Only the second is evidence of absence, and treating a
+ * refusal as absence would silence a light that is merely fussy about a single
+ * attribute — which is not hypothetical: every light here refuses
+ * `colorMode` reporting while answering everything else perfectly.
+ */
+export const isNoAnswer = (error: unknown): boolean =>
+  TIMED_OUT.test(error instanceof Error ? error.message : String(error));

@@ -8,7 +8,7 @@ import type { Logging } from "homebridge";
 import type { Models } from "zigbee-herdsman";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { configureReporting } from "#zigbee/reporting";
+import { configureReporting, refresh } from "#zigbee/reporting";
 
 type Item = { attribute: string; reportableChange?: number };
 
@@ -18,6 +18,9 @@ class FakeEndpoint {
   readonly configured: { cluster: string; items: Item[] }[] = [];
   /** Attributes the device refuses to report on. */
   refuse = new Set<string>();
+  /** Clusters whose reads go unanswered. */
+  unreadable = new Set<string>();
+  readonly reads: string[] = [];
 
   async bind(cluster: string): Promise<void> {
     this.bound.push(String(cluster));
@@ -27,6 +30,12 @@ class FakeEndpoint {
     await Promise.resolve();
     if (items.some((i) => this.refuse.has(i.attribute))) throw new Error("UNSUPPORTED_ATTRIBUTE");
     this.configured.push({ cluster: String(cluster), items });
+  }
+  async read(cluster: string): Promise<Record<string, unknown>> {
+    await Promise.resolve();
+    this.reads.push(String(cluster));
+    if (this.unreadable.has(String(cluster))) throw new Error("timed out after 10000ms");
+    return {};
   }
   supportsInputCluster(): boolean {
     return true;
@@ -123,5 +132,33 @@ describe("configureReporting", () => {
     };
     await run();
     expect(endpoint.configured).toHaveLength(0);
+  });
+});
+
+describe("refresh", () => {
+  const poll = async (): Promise<boolean> =>
+    await refresh(endpoint as unknown as Models.Endpoint, log);
+
+  it("reads every cluster of a device that is answering", async () => {
+    expect(await poll()).toBe(true);
+    expect(endpoint.reads).toEqual(["genOnOff", "genLevelCtrl", "lightingColorCtrl"]);
+  });
+
+  it("gives up on a device that did not answer its first read", async () => {
+    // Each further read would spend its own ten-second timeout rediscovering
+    // the same absence, and the adapter runs one transaction at a time — so
+    // this is the difference between blocking the radio for ten seconds and
+    // blocking it for thirty.
+    endpoint.unreadable = new Set(["genOnOff", "genLevelCtrl", "lightingColorCtrl"]);
+
+    expect(await poll()).toBe(false);
+    expect(endpoint.reads).toEqual(["genOnOff"]);
+  });
+
+  it("presses on past a single cluster a reachable device would not answer", async () => {
+    endpoint.unreadable = new Set(["lightingColorCtrl"]);
+
+    expect(await poll()).toBe(true);
+    expect(endpoint.reads).toEqual(["genOnOff", "genLevelCtrl", "lightingColorCtrl"]);
   });
 });

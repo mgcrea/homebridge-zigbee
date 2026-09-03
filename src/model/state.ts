@@ -82,6 +82,11 @@ export class StateStore {
     return this.#values.has(key);
   }
 
+  /** When anything was last heard from this endpoint, or undefined if never. */
+  heardAt(key: StateKey): number | undefined {
+    return this.#lastHeard.get(key);
+  }
+
   /** How long since anything was heard from this endpoint, or undefined if never. */
   ageMs(key: StateKey, now: number = Date.now()): number | undefined {
     const heard = this.#lastHeard.get(key);

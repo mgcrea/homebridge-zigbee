@@ -10,8 +10,8 @@ import { refresh } from "#zigbee/reporting";
 /** HAP refuses a SerialNumber longer than this, and drops the whole accessory. */
 const MAX_SERIAL_LENGTH = 64;
 
-/** Missed polls before a device is worth mentioning in the log. */
-const MISSES_BEFORE_WARNING = 3;
+/** Consecutive unanswered attempts before a device is treated as gone. */
+const FAILURES_BEFORE_UNREACHABLE = 3;
 
 /**
  * What every Zigbee accessory has in common.
@@ -24,8 +24,12 @@ export abstract class BaseAccessory {
   protected readonly queue: DeviceQueue;
   readonly #unsubscribes: (() => void)[] = [];
   #disposed = false;
-  /** Consecutive failed refreshes; drives the warning, not the freshness check. */
-  #missedRefreshes = 0;
+  /** Consecutive unanswered attempts; drives the warning and the send guard. */
+  #consecutiveFailures = 0;
+  /** When the most recent unanswered attempt happened. */
+  #lastFailureAt = 0;
+  /** Whether the outage has already been announced, so it is announced once. */
+  #announced = false;
 
   constructor(
     protected readonly platform: ZigbeePlatform,
@@ -58,37 +62,95 @@ export abstract class BaseAccessory {
   async refreshFromRadio(): Promise<void> {
     if (this.#disposed) return;
 
+    // Unreachable devices are still polled, deliberately. It costs one
+    // unanswered read per cycle, and it is the only way back: a device whose
+    // reporting configuration did not survive its power cycle will never speak
+    // first, so if we stop asking, it stays unreachable for good.
     const reached = await this.queue.run(
       async () => await refresh(this.endpoint, this.platform.log),
     );
-    this.#noteRefresh(reached);
+    this.noteRadioOutcome(reached);
   }
 
   /**
-   * Say when a device stops answering, once — and when it comes back.
+   * Whether it is worth putting anything on the radio for this device.
    *
-   * Individual read failures are logged at debug, which is off by default, so
-   * a device that had quietly stopped answering every poll produced no visible
-   * output at all. Announcing the transition rather than every failure keeps a
-   * long outage from becoming thousands of identical lines.
+   * A device that has not answered several attempts running is gone, and each
+   * further command spends a full ten-second timeout rediscovering that. The
+   * cost is not just the wasted send: the adapter is limited to one transaction
+   * at a time, so every other device in the house queues behind it. Adaptive
+   * Lighting made this plain — it drives colour temperature once a minute, so a
+   * single lamp switched off at a garden relay produced a failed send every
+   * minute all night, and the lamps that *were* reachable answered sluggishly
+   * the whole time.
+   *
+   * Reads are untouched. They are answered from the store and go on being
+   * refused by `assertReadable` while the device is stale, so the Home app
+   * still shows "No Response" rather than a stale guess.
    */
-  #noteRefresh(reached: boolean): void {
+  get unreachable(): boolean {
+    if (this.#consecutiveFailures < FAILURES_BEFORE_UNREACHABLE) return false;
+
+    // Anything heard since the last failed attempt settles it. An unsolicited
+    // report is proof the device is back, and outranks a counter that
+    // describes a moment which has since passed.
+    const heard = this.platform.state.heardAt(this.key);
+    return heard === undefined || heard <= this.#lastFailureAt;
+  }
+
+  /**
+   * Skip a command for a device that is not answering, and put the Home app
+   * back where the house actually is.
+   *
+   * Returns whether the command was skipped, so the caller can stop. The log
+   * line is at debug: the outage was already announced once by
+   * `noteRadioOutcome`, and Adaptive Lighting alone would otherwise write a
+   * line a minute for as long as the lamp stays off.
+   */
+  protected declineWhileUnreachable(action: string): boolean {
+    if (!this.unreachable) return false;
+
+    this.platform.log.debug(
+      `${this.displayName} is not answering, so ${action} was not sent to the radio.`,
+    );
+    this.publishFromStore();
+    return true;
+  }
+
+  /**
+   * Record the outcome of something that went to the radio, and say when a
+   * device stops answering — once — and when it comes back.
+   *
+   * Refreshes and commands both feed this, because both are equally good
+   * evidence about whether the device is there. A command the device *refused*
+   * counts as reached: it answered, and it said no.
+   *
+   * Individual failures are logged at debug, which is off by default, so a
+   * device that had quietly stopped answering produced no visible output at
+   * all. Announcing the transition rather than every failure keeps a long
+   * outage from becoming thousands of identical lines.
+   */
+  protected noteRadioOutcome(reached: boolean): void {
     if (reached) {
-      if (this.#missedRefreshes >= MISSES_BEFORE_WARNING) {
+      if (this.#announced) {
         this.platform.log.info(`${this.displayName} is responding again.`);
+        this.#announced = false;
       }
-      this.#missedRefreshes = 0;
+      this.#consecutiveFailures = 0;
       return;
     }
 
-    this.#missedRefreshes += 1;
-    if (this.#missedRefreshes === MISSES_BEFORE_WARNING) {
+    this.#consecutiveFailures += 1;
+    this.#lastFailureAt = Date.now();
+
+    if (this.#consecutiveFailures >= FAILURES_BEFORE_UNREACHABLE && !this.#announced) {
+      this.#announced = true;
       this.platform.log.warn(
-        `${this.displayName} has not answered ${MISSES_BEFORE_WARNING} polls in a row. ` +
-          "It will show as unresponsive in the Home app until it does. Check that it still has " +
-          "power first — a lamp switched off at the wall looks exactly like this. If it is " +
-          "powered, it is out of range, and a mains-powered device between it and the " +
-          "coordinator will extend the mesh.",
+        `${this.displayName} has not answered ${FAILURES_BEFORE_UNREACHABLE} attempts in a row. ` +
+          "It will show as unresponsive in the Home app, and nothing further will be sent to it " +
+          "until it answers, so that one absent device does not slow the rest down. The usual " +
+          "cause is that it has lost power — a lamp switched off at the wall or on a relay looks " +
+          "exactly like this — and the next likeliest is that it is out of range.",
       );
     }
   }

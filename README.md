@@ -186,9 +186,17 @@ Stop Homebridge first. This prints the coordinator's firmware, every paired devi
 derives from them — so a light exposed as the wrong kind of accessory can be traced to the
 cluster that decided it.
 
-**A light shows "No Response".** Nothing has been heard from it yet. This is deliberate: showing
-"Off" for a device that has not answered is a confident wrong answer, and "No Response" is
-visibly an absence of one.
+**A light shows "No Response".** Either nothing has been heard from it yet, or it has stopped
+answering. This is deliberate: showing "Off" for a device that has not answered is a confident
+wrong answer, and "No Response" is visibly an absence of one.
+
+After three unanswered attempts the plugin says so in the log, once, and stops sending to that
+device until it answers again — it keeps polling it, which is how it notices the device is back,
+but no commands go out meanwhile. That matters because the adapter runs one transaction at a
+time: every send to an absent device holds the radio for a ten-second timeout, and everything
+else in the house waits behind it. A lamp on a switched-off relay with Adaptive Lighting enabled
+would otherwise produce a failed send every minute, all night. A device that *answers* and
+refuses a command is unaffected — only silence counts.
 
 **A light changed at the wall does not update in HomeKit.** Its attribute reporting did not take.
 The plugin re-arms reporting whenever a device re-announces itself, so power-cycling the bulb

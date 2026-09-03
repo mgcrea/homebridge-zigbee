@@ -13,6 +13,7 @@ import { CLUSTER } from "#model/capability";
 import type { DeviceView } from "#model/device";
 import type { StateChange } from "#model/state";
 import type { ZigbeePlatform } from "#platform";
+import { isNoAnswer } from "#util/describe";
 
 const APPLY_KEY = "apply";
 
@@ -61,6 +62,7 @@ export class OutletAccessory extends BaseAccessory {
     this.queue.coalesce(APPLY_KEY, async () => {
       const on = this.#desired;
       if (on === undefined) return;
+      if (this.declineWhileUnreachable("the change")) return;
       try {
         await this.endpoint.command("genOnOff", on ? "on" : "off", {});
         // Record what the command asked for, so a read landing before the
@@ -68,7 +70,9 @@ export class OutletAccessory extends BaseAccessory {
         // back and make the tile flick to its old position. The report still
         // arrives and still wins; this only covers the gap.
         this.platform.state.apply(this.view.key, CLUSTER.onOff, { onOff: on });
+        this.noteRadioOutcome(true);
       } catch (error) {
+        this.noteRadioOutcome(!isNoAnswer(error));
         this.reportCommandFailure("did not switch", error);
       }
     });

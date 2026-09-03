@@ -192,18 +192,32 @@ export const refresh = async (endpoint: Models.Endpoint, log: Logging): Promise<
     }
   };
 
-  await attempt(CLUSTER.onOff, async () => await endpoint.read("genOnOff", ["onOff"]));
-  await attempt(CLUSTER.level, async () => await endpoint.read("genLevelCtrl", ["currentLevel"]));
-  await attempt(
-    CLUSTER.color,
-    async () =>
-      await endpoint.read("lightingColorCtrl", [
-        "colorMode",
-        "colorTemperature",
-        "currentX",
-        "currentY",
-      ]),
-  );
+  const reads: [cluster: string, read: () => Promise<unknown>][] = [
+    [CLUSTER.onOff, async () => await endpoint.read("genOnOff", ["onOff"])],
+    [CLUSTER.level, async () => await endpoint.read("genLevelCtrl", ["currentLevel"])],
+    [
+      CLUSTER.color,
+      async () =>
+        await endpoint.read("lightingColorCtrl", [
+          "colorMode",
+          "colorTemperature",
+          "currentX",
+          "currentY",
+        ]),
+    ],
+  ];
+
+  for (const [cluster, read] of reads) {
+    await attempt(cluster, read);
+
+    // Stop once a device has failed to answer anything at all. Each remaining
+    // read would spend its own ten-second timeout rediscovering the same
+    // absence, and the adapter runs one transaction at a time, so that is
+    // thirty seconds of radio the rest of the house waits behind rather than
+    // ten. Once something *has* answered, a later failure is a per-cluster
+    // quirk rather than an absent device, and is worth pressing on through.
+    if (attempted && !reached) break;
+  }
 
   // Nothing to read is not a failure to reach the device.
   return attempted ? reached : true;

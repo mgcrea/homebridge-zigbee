@@ -150,12 +150,18 @@ export class FakeEndpoint {
   failNext = false;
   /** A specific error to throw once, for assertions about how it is reported. */
   failWith: Error | undefined;
+  /** An error thrown by every command, for outages that last. */
+  failEvery: Error | undefined;
+  /** Every command attempt, including the ones made to fail. */
+  attempts = 0;
 
   async command(
     cluster: string,
     command: string,
     payload: Record<string, unknown>,
   ): Promise<undefined> {
+    this.attempts += 1;
+    if (this.failEvery) throw this.failEvery;
     if (this.failWith) {
       const error = this.failWith;
       this.failWith = undefined;

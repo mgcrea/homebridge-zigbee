@@ -33,6 +33,7 @@ import {
   xyToAttributes,
   xyToHueSat,
 } from "#util/color";
+import { isNoAnswer } from "#util/describe";
 
 /** All pending writes flush together, so they share one key. */
 const APPLY_KEY = "apply";
@@ -276,12 +277,20 @@ export class LightAccessory extends BaseAccessory {
    * and switching on, so no separate `on` is needed alongside it.
    */
   async #apply(pending: Pending): Promise<void> {
+    if (this.declineWhileUnreachable("the change")) return;
+
     const transition = Math.round(this.platform.config.transitionTime * 10);
+    // Only an attempt that actually reached the radio says anything about
+    // whether the device is there; an empty pending record must not be taken
+    // as proof of life.
+    let sent = false;
 
     try {
       if (pending.on === false) {
         await this.endpoint.command("genOnOff", "off", {});
+        sent = true;
         this.#confirm(CLUSTER.onOff, { onOff: false });
+        this.noteRadioOutcome(true);
         return;
       }
 
@@ -290,6 +299,7 @@ export class LightAccessory extends BaseAccessory {
           colortemp: pending.mireds,
           transtime: transition,
         });
+        sent = true;
         this.#confirm(CLUSTER.color, {
           colorTemperature: pending.mireds,
           colorMode: COLOR_MODE.colorTemperature,
@@ -307,6 +317,7 @@ export class LightAccessory extends BaseAccessory {
           ...attributes,
           transtime: transition,
         });
+        sent = true;
         this.#confirm(CLUSTER.color, {
           currentX: attributes.colorx,
           currentY: attributes.colory,
@@ -319,13 +330,20 @@ export class LightAccessory extends BaseAccessory {
           level: pending.level,
           transtime: transition,
         });
+        sent = true;
         this.#confirm(CLUSTER.level, { currentLevel: pending.level });
         this.#confirm(CLUSTER.onOff, { onOff: true });
       } else if (pending.on === true) {
         await this.endpoint.command("genOnOff", "on", {});
+        sent = true;
         this.#confirm(CLUSTER.onOff, { onOff: true });
       }
+
+      if (sent) this.noteRadioOutcome(true);
     } catch (error) {
+      // A refusal means the device answered, so it does not count against
+      // reachability — only silence does.
+      this.noteRadioOutcome(!isNoAnswer(error));
       this.reportCommandFailure("did not accept the change", error);
     }
   }

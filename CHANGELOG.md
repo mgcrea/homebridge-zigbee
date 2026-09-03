@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.2.0](https://github.com/mgcrea/homebridge-zigbee/compare/v0.1.3...v0.2.0) (2026-09-03)
+## [0.2.0](https://github.com/mgcrea/homebridge-zigbee/compare/0.1.3...0.2.0) (2026-09-03)
 
 No accessory is re-registered by this release: rooms, names and automations are preserved.
 

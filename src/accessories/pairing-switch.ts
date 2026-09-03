@@ -41,7 +41,7 @@ export class PairingSwitch {
     this.#service
       .getCharacteristic(Characteristic.On)
       .onGet(() => this.#open)
-      .onSet((value) => this.#set(value));
+      .onSet(async (value) => await this.#set(value));
   }
 
   /** Reflect what the controller actually did, whoever asked for it. */
@@ -50,9 +50,15 @@ export class PairingSwitch {
     this.#service.updateCharacteristic(this.platform.Characteristic.On, open);
   }
 
-  #set(value: CharacteristicValue): void {
-    const wanted = value === true;
-    void this.#apply(wanted);
+  /**
+   * Returned, not fired and forgotten.
+   *
+   * hap takes the handler resolving as the write having succeeded, so voiding
+   * the promise meant the switch always reported success — including when the
+   * coordinator was not connected and nothing had been opened at all.
+   */
+  async #set(value: CharacteristicValue): Promise<void> {
+    await this.#apply(value === true);
   }
 
   async #apply(wanted: boolean): Promise<void> {
@@ -60,7 +66,11 @@ export class PairingSwitch {
     if (!controller) {
       this.platform.log.warn("Cannot change pairing: the coordinator is not connected.");
       this.setOpen(false);
-      return;
+      // -70402 is `HAPStatus.SERVICE_COMMUNICATION_FAILURE`, spelled
+      // numerically for the same reason it is in the base accessory. Without
+      // it the Home app shows the switch as having turned on while the network
+      // is still shut.
+      throw new this.platform.api.hap.HapStatusError(-70402);
     }
 
     try {
@@ -80,6 +90,7 @@ export class PairingSwitch {
     } catch (error) {
       this.platform.log.error(`Could not change pairing: ${describe(error)}`);
       this.setOpen(false);
+      throw new this.platform.api.hap.HapStatusError(-70402);
     }
   }
 }

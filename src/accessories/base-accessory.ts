@@ -4,6 +4,7 @@ import type { Models } from "zigbee-herdsman";
 import type { DeviceView } from "#model/device";
 import { DeviceQueue } from "#model/queue";
 import type { ZigbeePlatform } from "#platform";
+import { PLUGIN_VERSION } from "#settings";
 import { describeCommandFailure } from "#util/describe";
 import { refresh } from "#zigbee/reporting";
 
@@ -262,6 +263,14 @@ export abstract class BaseAccessory {
     }
   }
 
+  /**
+   * Fill in the AccessoryInformation block.
+   *
+   * Called again on every rediscovery, because the view it reads from can
+   * improve: a device interviewed while half awake reports no model and no
+   * firmware, and running this only in the constructor left "Unknown" in the
+   * Home app for the life of the install.
+   */
   protected configureInformation(): void {
     const { Service, Characteristic } = this.platform;
     const information =
@@ -271,12 +280,19 @@ export abstract class BaseAccessory {
     information
       .setCharacteristic(Characteristic.Manufacturer, this.view.manufacturer)
       .setCharacteristic(Characteristic.Model, this.view.model)
-      .setCharacteristic(Characteristic.SerialNumber, usableSerial(this.view.ieee))
-      .setCharacteristic(Characteristic.Name, this.displayName);
-
-    if (this.view.firmware) {
-      information.setCharacteristic(Characteristic.FirmwareRevision, this.view.firmware);
-    }
+      // One device with several controllable endpoints becomes several HomeKit
+      // accessories, and giving them all the same serial number makes them
+      // indistinguishable to anything that identifies an accessory by it.
+      .setCharacteristic(
+        Characteristic.SerialNumber,
+        usableSerial(`${this.view.ieee}-${this.view.endpointId}`),
+      )
+      .setCharacteristic(Characteristic.Name, this.displayName)
+      // Always set. Plenty of Zigbee devices do not implement
+      // `softwareBuildID`, and hap warns about the missing characteristic on
+      // every single start — so the plugin's own version stands in, which is at
+      // least true of whatever is answering for the device.
+      .setCharacteristic(Characteristic.FirmwareRevision, this.view.firmware ?? PLUGIN_VERSION);
   }
 
   /** Track a store subscription so disposal can undo it. */
@@ -293,8 +309,12 @@ export abstract class BaseAccessory {
 }
 
 /**
- * HAP silently drops an accessory whose SerialNumber is over 64 characters.
- * An IEEE address is never close, but the guard costs nothing.
+ * HAP silently drops an accessory whose SerialNumber is over 64 characters, and
+ * an empty one is not a valid serial either.
+ *
+ * An IEEE address plus an endpoint number is never close to the limit, but the
+ * guard costs nothing — and the empty case used to fall through to
+ * `"".slice(0, 64)`, which is still empty.
  */
-export const usableSerial = (ieee: string): string =>
-  ieee.length > 0 && ieee.length <= MAX_SERIAL_LENGTH ? ieee : ieee.slice(0, MAX_SERIAL_LENGTH);
+export const usableSerial = (serial: string): string =>
+  serial.length === 0 ? "unknown" : serial.slice(0, MAX_SERIAL_LENGTH);

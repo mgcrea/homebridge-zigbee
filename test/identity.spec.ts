@@ -93,3 +93,62 @@ describe("writeStackConfig", () => {
     expect(written["eui64"]).toBe(identity.eui64);
   });
 });
+
+describe("the EUI64", () => {
+  /**
+   * zoh's failure mode for an unusable EUI64 is silent. It logs at its own
+   * error level and falls back to a hard-coded constant — the ASCII bytes
+   * `ZoHonZ2M` — which every install of zoh in the world shares. Two
+   * coordinators within radio range would then claim the same IEEE address,
+   * which is precisely what this file exists to prevent, so it is checked here
+   * rather than merely for being a string.
+   */
+  const write = (eui64: unknown): void => {
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 1,
+        networkKey: "000102030405060708090a0b0c0d0e0f",
+        panId: 0x1234,
+        extendedPanId: "0001020304050607",
+        eui64,
+      }),
+    );
+  };
+
+  it("accepts the form zoh's BigInt() can actually parse", () => {
+    write("0x00124b0029AB1234");
+    expect(loadOrCreateIdentity(path).eui64).toBe("0x00124b0029AB1234");
+  });
+
+  it.each([
+    ["missing its 0x prefix", "00124b0029ab1234"],
+    ["too short", "0x00124b0029ab12"],
+    ["not hex at all", "0xZoHonZ2M000000"],
+    ["all zeroes, which means unset", "0x0000000000000000"],
+    ["all ones, which is the broadcast address", "0xffffffffffffffff"],
+    ["not a string", 42],
+  ])("refuses one that is %s", (_why, eui64) => {
+    write(eui64);
+    expect(() => loadOrCreateIdentity(path)).toThrow(IdentityError);
+  });
+});
+
+describe("an identity from a future version", () => {
+  it("is refused rather than misread", () => {
+    // Misreading it means forming a new network, so guessing is the one thing
+    // that must not happen here.
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 2,
+        networkKey: "000102030405060708090a0b0c0d0e0f",
+        panId: 0x1234,
+        extendedPanId: "0001020304050607",
+        eui64: "0x00124b0029ab1234",
+      }),
+    );
+
+    expect(() => loadOrCreateIdentity(path)).toThrow(/newer version/);
+  });
+});

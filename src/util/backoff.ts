@@ -24,7 +24,9 @@ export const createBackoff = ({
     next: () => {
       const delay = Math.min(max, initial * factor ** attempts);
       attempts += 1;
-      // Full jitter: anywhere in [delay/2, delay].
+      // Equal jitter: anywhere in [delay/2, delay]. Deliberately not full
+      // jitter — a retry that can land arbitrarily close to zero is no gentler
+      // on a coordinator that has just refused to open than no backoff at all.
       return Math.round(delay / 2 + Math.random() * (delay / 2));
     },
     reset: () => {

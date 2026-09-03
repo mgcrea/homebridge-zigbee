@@ -92,6 +92,7 @@ export class OutletAccessory extends BaseAccessory {
   update(view: DeviceView, endpoint: Models.Endpoint): void {
     this.view = view;
     this.adoptEndpoint(endpoint);
+    this.configureInformation();
   }
 
   protected override publishFromStore(): void {

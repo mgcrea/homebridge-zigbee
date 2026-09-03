@@ -65,3 +65,47 @@ describe("device overrides", () => {
     expect(override?.exclude).toBe(true);
   });
 });
+
+describe("per-device rows the Config UI leaves behind", () => {
+  /**
+   * Pressing "Add" in the Config UI writes an empty object into the list
+   * before anything is typed into it. Parsing the array as a whole then failed
+   * on that one row, `parseConfig` threw, and the platform went dormant — every
+   * light in the house unresponsive because of a row nobody had filled in yet.
+   */
+  it("drops an unfinished row and keeps the rest", () => {
+    const warnings: string[] = [];
+    const config = parseConfig(
+      base({ devices: [{}, { ieee: "0x00178801020304", exclude: true }] }),
+      (message) => warnings.push(message),
+    );
+
+    expect(config.devices).toHaveLength(1);
+    expect(config.devices[0]?.ieee).toBe("0x00178801020304");
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("says which row and which field, so it can be found", () => {
+    const warnings: string[] = [];
+    parseConfig(base({ devices: [{ ieee: 42 }] }), (message) => warnings.push(message));
+
+    expect(warnings[0]).toContain("devices[0]");
+    expect(warnings[0]).toContain("ieee");
+  });
+
+  it("ignores a devices value that is not a list at all", () => {
+    const warnings: string[] = [];
+    const config = parseConfig(base({ devices: "0x00178801020304" }), (message) =>
+      warnings.push(message),
+    );
+
+    expect(config.devices).toEqual([]);
+    expect(warnings[0]).toContain("expected a list");
+  });
+
+  it("still refuses to start without a port, which is not recoverable", () => {
+    // The distinction is whether the platform can do anything useful without
+    // the field. Without a port there is nothing to open.
+    expect(() => parseConfig({ platform: "Zigbee" } as PlatformConfig)).toThrow(ConfigError);
+  });
+});

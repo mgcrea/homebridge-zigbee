@@ -15,8 +15,9 @@
     "typescript/no-explicit-any": "error",
     "unicorn/prefer-node-protocol": "error",
     "no-console": "error",
-    // Following a redirect chain, reconnect backoff and request pacing are all
-    // inherently sequential — parallelising them would be wrong, not faster.
+    // Discovery, reconnect backoff and the periodic refresh are all inherently
+    // sequential: the adapter runs one transaction at a time, so parallelising
+    // them would be wrong rather than faster.
     "no-await-in-loop": "off"
   },
   "overrides": [

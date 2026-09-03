@@ -38,7 +38,17 @@ export const DEFAULT_CHANNEL = 15;
  * The adapters zigbee-herdsman ships. Validated here so a typo produces a
  * sentence at startup rather than an obscure failure once the port is open.
  */
-const zAdapter = z.enum(["deconz", "ember", "zstack", "zboss", "zigate", "ezsp", "zoh"]);
+export const ADAPTERS = [
+  "zoh",
+  "ember",
+  "ezsp",
+  "zstack",
+  "deconz",
+  "zboss",
+  "zigate",
+] as const satisfies readonly AdapterTypes.Adapter[];
+
+const zAdapter = z.enum(ADAPTERS);
 
 const zPerDevice = z.looseObject({
   /** The device's IEEE address, as shown by `pnpm diagnose`. Matched case-insensitively. */
@@ -48,8 +58,6 @@ const zPerDevice = z.looseObject({
 });
 
 const zConfig = z.looseObject({
-  name: z.string().optional(),
-
   port: z.string().optional(),
   adapter: zAdapter.optional(),
   baudRate: z.number().optional(),
@@ -65,7 +73,11 @@ const zConfig = z.looseObject({
   allowNetworkReset: z.boolean().optional(),
   debug: z.boolean().optional(),
 
-  devices: z.array(zPerDevice).optional(),
+  // Walked by hand rather than parsed as an array: the Config UI creates an
+  // empty row the moment someone presses "Add", and a `z.array` parse fails on
+  // the whole list because of it — which took the platform dormant and left
+  // every light in the house unresponsive until the row was deleted by hand.
+  devices: z.unknown().optional(),
 });
 
 export type DeviceOverride = {
@@ -75,7 +87,6 @@ export type DeviceOverride = {
 };
 
 export type ZigbeeConfig = {
-  name: string;
   port: string;
   adapter: AdapterTypes.Adapter;
   /**
@@ -112,10 +123,51 @@ export const normalizeIeee = (ieee: string): string => {
   return trimmed.startsWith("0x") ? trimmed : `0x${trimmed}`;
 };
 
-export const parseConfig = (raw: PlatformConfig): ZigbeeConfig => {
+/** Which field went wrong, not just what was wrong with it. */
+const describeIssue = (error: z.ZodError): string => {
+  const [issue] = error.issues;
+  const path = issue?.path.join(".");
+  const message = issue?.message ?? "is not usable";
+  return path ? `"${path}" ${message}` : message;
+};
+
+/**
+ * Keep the per-device rows that are usable and say why the others went.
+ *
+ * One malformed row is not a reason to take the platform down. The port is —
+ * without it there is nothing to open — but an unfinished override should cost
+ * the user that override, not their lights.
+ */
+const parseDevices = (value: unknown, warn: (message: string) => void): DeviceOverride[] => {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    warn('Ignoring "devices": expected a list.');
+    return [];
+  }
+
+  const kept: DeviceOverride[] = [];
+  value.forEach((entry, index) => {
+    const result = zPerDevice.safeParse(entry);
+    if (!result.success) {
+      warn(`Ignoring devices[${index}]: ${describeIssue(result.error)}.`);
+      return;
+    }
+    kept.push({
+      ieee: normalizeIeee(result.data.ieee),
+      name: result.data.name?.trim() || undefined,
+      exclude: result.data.exclude ?? false,
+    });
+  });
+  return kept;
+};
+
+export const parseConfig = (
+  raw: PlatformConfig,
+  warn: (message: string) => void = () => undefined,
+): ZigbeeConfig => {
   const parsed = zConfig.safeParse(raw);
   if (!parsed.success) {
-    throw new ConfigError(`Invalid configuration: ${parsed.error.issues[0]?.message ?? "unknown"}`);
+    throw new ConfigError(`Invalid configuration: ${describeIssue(parsed.error)}`);
   }
   const config = parsed.data;
 
@@ -128,7 +180,6 @@ export const parseConfig = (raw: PlatformConfig): ZigbeeConfig => {
   }
 
   return {
-    name: config.name?.trim() || "Zigbee",
     port,
     adapter: config.adapter ?? "zoh",
     baudRate: config.baudRate,
@@ -156,11 +207,7 @@ export const parseConfig = (raw: PlatformConfig): ZigbeeConfig => {
     ),
     allowNetworkReset: config.allowNetworkReset ?? false,
     debug: config.debug ?? false,
-    devices: (config.devices ?? []).map((device) => ({
-      ieee: normalizeIeee(device.ieee),
-      name: device.name?.trim() || undefined,
-      exclude: device.exclude ?? false,
-    })),
+    devices: parseDevices(config.devices, warn),
   };
 };
 

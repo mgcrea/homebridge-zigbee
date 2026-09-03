@@ -32,30 +32,51 @@ const resolve = (message: string | (() => string)): string =>
  * zoh raises it at error level with a full stack trace, once per frame. Left
  * alone it buries real errors in the Homebridge log.
  */
-const UNACTIONABLE = [/Unsupported MAC frame/i];
+const UNACTIONABLE: readonly (readonly [key: string, pattern: RegExp, explanation: string])[] = [
+  [
+    "mac",
+    /Unsupported MAC frame/i,
+    "Ignoring frames this coordinator cannot decode. These are MAC-secured frames from another " +
+      "network on the same channel — typically Thread. They are harmless; enable debug logging " +
+      "to see them.",
+  ],
+];
 
-const isUnactionable = (message: string): boolean =>
-  UNACTIONABLE.some((pattern) => pattern.test(message));
+/**
+ * herdsman `info` lines that must not be swallowed.
+ *
+ * Everything herdsman logs at info goes to debug, because most of it is
+ * per-frame bookkeeping. These two are not: they describe the coordinator
+ * changing identity, which is the situation the reset guard exists for, and an
+ * operator who cannot see them has no way of knowing why their devices went
+ * quiet.
+ */
+const NOTEWORTHY = [/Coordinator address changed/i, /does not match adapter channel/i];
 
 export const installHerdsmanLogger = (log: Logging, debug: boolean): void => {
-  /** Explain the demoted noise once, so it is discoverable but not repeated. */
+  /**
+   * Which demotions have been explained already, keyed per pattern.
+   *
+   * One key for the whole table meant the first pattern to fire silenced the
+   * explanation for every later one, so a second kind of noise arrived with no
+   * account of itself at all.
+   */
   const explained = new Set<string>();
 
   const demote = (message: string): boolean => {
-    if (!isUnactionable(message)) return false;
+    const matched = UNACTIONABLE.find(([, pattern]) => pattern.test(message));
+    if (!matched) return false;
 
+    const [key, , explanation] = matched;
     // Only the first line: the stack trace points into zoh's internals and says
     // nothing about this network.
     const [summary = message] = message.split("\n");
-    if (!explained.has("mac")) {
-      explained.add("mac");
-      log.info(
-        `Ignoring frames this coordinator cannot decode (${summary.trim()}). These are ` +
-          "MAC-secured frames from another network on the same channel — typically Thread. " +
-          "They are harmless; enable debug logging to see them.",
-      );
-    } else {
+
+    if (explained.has(key)) {
       log.debug(summary.trim());
+    } else {
+      explained.add(key);
+      log.info(`${explanation} (${summary.trim()})`);
     }
     return true;
   };
@@ -64,7 +85,14 @@ export const installHerdsmanLogger = (log: Logging, debug: boolean): void => {
     debug: debug
       ? (message, namespace) => log.debug(`[${namespace}] ${resolve(message)}`)
       : () => undefined,
-    info: (message, namespace) => log.debug(`[${namespace}] ${resolve(message)}`),
+    info: (message, namespace) => {
+      const text = resolve(message);
+      if (NOTEWORTHY.some((pattern) => pattern.test(text))) {
+        log.info(`[${namespace}] ${text}`);
+        return;
+      }
+      log.debug(`[${namespace}] ${text}`);
+    },
     warning: (message, namespace) => {
       const text = resolve(message);
       if (demote(text)) return;

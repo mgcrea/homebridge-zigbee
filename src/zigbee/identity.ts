@@ -23,6 +23,20 @@ import { dirname, join } from "node:path";
 /** Reserved by the spec, and the value stacks use to mean "unset". */
 const INVALID_PAN_IDS = new Set([0x0000, 0xffff]);
 
+/** `0x` and sixteen hex digits, which is what zoh's `BigInt()` will accept. */
+const EUI64 = /^0x[0-9a-f]{16}$/i;
+
+/**
+ * The two EUI64 values that mean "nobody".
+ *
+ * All-zero is the unset value; all-ones is the 802.15.4 broadcast address.
+ * Either one hands the radio an address it cannot be reached at.
+ */
+const INVALID_EUI64 = new Set(["0x0000000000000000", "0xffffffffffffffff"]);
+
+/** The only shape of stored identity this version knows how to read. */
+const IDENTITY_VERSION = 1;
+
 export type NetworkIdentity = {
   /** 16 bytes. */
   networkKey: number[];
@@ -34,7 +48,7 @@ export type NetworkIdentity = {
 };
 
 type StoredIdentity = {
-  version: 1;
+  version: number;
   networkKey: string;
   panId: number;
   extendedPanId: string;
@@ -100,13 +114,23 @@ const readIdentity = (path: string): NetworkIdentity | undefined => {
 
   const networkKey = fromHex(parsed.networkKey ?? "", 16);
   const extendedPanId = fromHex(parsed.extendedPanId ?? "", 8);
+  const eui64 = typeof parsed.eui64 === "string" ? parsed.eui64.trim() : undefined;
+
+  // The EUI64 is checked properly rather than merely for being a string,
+  // because zoh's failure mode for an unparsable one is silent: it logs at its
+  // own error level and falls back to a hard-coded constant — the ASCII bytes
+  // `ZoHonZ2M` — which every install of it shares. Two coordinators within
+  // range would then claim the same IEEE address, which is the exact thing
+  // this file exists to prevent.
+  const usableEui64 =
+    eui64 !== undefined && EUI64.test(eui64) && !INVALID_EUI64.has(eui64.toLowerCase());
 
   if (
     !networkKey ||
     !extendedPanId ||
     typeof parsed.panId !== "number" ||
     INVALID_PAN_IDS.has(parsed.panId) ||
-    typeof parsed.eui64 !== "string"
+    !usableEui64
   ) {
     throw new IdentityError(
       `The Zigbee network identity at ${path} is incomplete or malformed. ` +
@@ -114,12 +138,22 @@ const readIdentity = (path: string): NetworkIdentity | undefined => {
     );
   }
 
-  return { networkKey, panId: parsed.panId, extendedPanId, eui64: parsed.eui64 };
+  // A future version may store something this one would misread, and
+  // misreading it means forming a new network.
+  if (parsed.version !== undefined && parsed.version !== IDENTITY_VERSION) {
+    throw new IdentityError(
+      `The Zigbee network identity at ${path} was written by a newer version of this plugin ` +
+        `(version ${String(parsed.version)}, this one understands ${IDENTITY_VERSION}). ` +
+        "Refusing to start rather than guessing at it and forming a new network.",
+    );
+  }
+
+  return { networkKey, panId: parsed.panId, extendedPanId, eui64 };
 };
 
 const writeIdentity = (path: string, identity: NetworkIdentity): void => {
   const stored: StoredIdentity = {
-    version: 1,
+    version: IDENTITY_VERSION,
     networkKey: toHex(identity.networkKey),
     panId: identity.panId,
     extendedPanId: toHex(identity.extendedPanId),
@@ -158,6 +192,11 @@ export const writeStackConfig = (stateDirectory: string, identity: NetworkIdenti
 
   if (current["eui64"] === identity.eui64) return path;
 
-  writeFileSync(path, `${JSON.stringify({ ...current, eui64: identity.eui64 }, null, 2)}\n`);
+  // Write-then-rename, like the identity itself. zoh reads this file at start
+  // and shrugs off anything it cannot parse — by falling back to the shared
+  // constant, which is precisely the outcome worth ruling out.
+  const temporary = `${path}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify({ ...current, eui64: identity.eui64 }, null, 2)}\n`);
+  renameSync(temporary, path);
   return path;
 };

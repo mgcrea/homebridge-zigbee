@@ -77,6 +77,20 @@ export class StateStore {
     return true;
   }
 
+  /**
+   * Note that the device was heard from, without any values to go with it.
+   *
+   * herdsman knows about traffic this store never sees — an announce, a route
+   * record, the ACK on a command — and reports it as `lastSeenChanged`. A
+   * device that speaks only in those still counts as present, and without this
+   * it read as stale and answered every HomeKit read with "No Response".
+   */
+  touch(key: StateKey, at: number = Date.now()): void {
+    const heard = this.#lastHeard.get(key);
+    if (heard !== undefined && heard >= at) return;
+    this.#lastHeard.set(key, at);
+  }
+
   /** Whether anything at all has been heard from this endpoint yet. */
   isKnown(key: StateKey): boolean {
     return this.#values.has(key);

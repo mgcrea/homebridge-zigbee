@@ -611,6 +611,7 @@ export class LightAccessory extends BaseAccessory {
       miredRange: view.miredRange ?? this.view.miredRange,
     };
     this.adoptEndpoint(endpoint);
+    this.configureInformation();
     // A rediscovery that found *more* than the first one did — the usual case
     // being a light that was unreachable at startup and has since been powered
     // up — gets its controls now rather than at the next restart.

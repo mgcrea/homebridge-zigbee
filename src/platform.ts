@@ -107,7 +107,9 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
     this.Characteristic = api.hap.Characteristic;
 
     try {
-      this.#config = parseConfig(config);
+      this.#config = parseConfig(config, (message) => {
+        this.log.warn(message);
+      });
     } catch (error) {
       // A misconfigured platform must not take Homebridge down with it; log
       // clearly and stay dormant so the rest of the bridge keeps working.
@@ -211,6 +213,15 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
       // A device that just re-announced has usually been power-cycled, and Hue
       // bulbs lose their reporting configuration when that happens.
       this.#scheduleRearm(device);
+    });
+    controller.on("lastSeenChanged", ({ device }) => {
+      // herdsman sees traffic this platform never does — an announce, a route
+      // record, the ACK on a command it routed. A device that only ever speaks
+      // in those still read as stale here, and every HomeKit read of it came
+      // back "No Response" while the thing was demonstrably on the network.
+      for (const endpoint of device.endpoints) {
+        this.state.touch(stateKey(device.ieeeAddr, endpoint.ID));
+      }
     });
     controller.on("permitJoinChanged", ({ permitted }) => {
       this.#pairing?.setOpen(permitted);
@@ -354,6 +365,7 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
       // one it was constructed with is holding a stale handle onto a network
       // that has since been re-entered.
       existing.update(view, endpoint);
+      this.#applyNameOverride(uuid, view);
       if (probe) this.#rememberProbe(uuid, probe);
       return;
     }
@@ -362,6 +374,13 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
     const accessory = cached ?? new this.api.platformAccessory(view.name, uuid);
     accessory.context["key"] = view.key;
     if (probe) accessory.context["probe"] = probe;
+    // A `devices[].name` added after the accessory was first registered never
+    // reached it: the name is only used when the accessory is constructed, and
+    // a cached one is not. Renaming in the Home app still wins, because that
+    // changes the config the user would have to change back.
+    if (this.config.devices.some((device) => device.name && device.ieee === view.ieee)) {
+      accessory.displayName = view.name;
+    }
 
     const instance = view.isLight
       ? new LightAccessory(this, accessory, view, endpoint)
@@ -376,6 +395,19 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
       this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
       this.#cached.set(uuid, accessory);
     }
+  }
+
+  /**
+   * Push a `devices[].name` onto an accessory that was registered before it.
+   */
+  #applyNameOverride(uuid: string, view: DeviceView): void {
+    const accessory = this.#cached.get(uuid);
+    if (!accessory) return;
+    if (!overrideFor(this.config, view.ieee)?.name) return;
+    if (accessory.displayName === view.name) return;
+
+    accessory.displayName = view.name;
+    this.api.updatePlatformAccessories([accessory]);
   }
 
   /**

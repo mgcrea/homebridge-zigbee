@@ -14,7 +14,8 @@
 import { resolve } from "node:path";
 import { Controller } from "zigbee-herdsman";
 
-import { parseConfig } from "#config";
+import { DEFAULT_CHANNEL, parseConfig } from "#config";
+import { controllerOptions, type ControllerPaths } from "#zigbee/controller";
 import { loadOrCreateIdentity, writeStackConfig } from "#zigbee/identity";
 import { capabilitiesFrom, CLUSTER, colorSupportFrom } from "#model/capability";
 
@@ -32,35 +33,19 @@ const config = parseConfig({
   platform: "Zigbee",
   port,
   adapter: process.env["ZIGBEE_ADAPTER"] ?? "zoh",
-  channel: Number(process.env["ZIGBEE_CHANNEL"] ?? 15),
+  channel: Number(process.env["ZIGBEE_CHANNEL"] ?? DEFAULT_CHANNEL),
 });
 
-const stateDirectory = resolve(process.env["ZIGBEE_STATE_DIR"] ?? ".zigbee");
+const paths: ControllerPaths = {
+  stateDirectory: resolve(process.env["ZIGBEE_STATE_DIR"] ?? ".zigbee"),
+};
+const { stateDirectory } = paths;
 const identity = loadOrCreateIdentity(resolve(stateDirectory, "identity.json"));
 writeStackConfig(stateDirectory, identity);
 
-console.log(`Opening ${config.port} (${config.adapter} @ ${config.baudRate})...`);
+console.log(`Opening ${config.port} (${config.adapter} @ ${config.baudRate ?? "auto"})...`);
 
-const controller = new Controller({
-  network: {
-    panID: identity.panId,
-    extendedPanID: identity.extendedPanId,
-    networkKey: identity.networkKey,
-    channelList: [config.channel],
-    networkKeyDistribute: false,
-  },
-  serialPort: {
-    path: config.port,
-    adapter: config.adapter,
-    baudRate: config.baudRate,
-    rtscts: config.rtscts,
-  },
-  databasePath: resolve(stateDirectory, "devices.db"),
-  databaseBackupPath: resolve(stateDirectory, "devices.db.backup"),
-  backupPath: resolve(stateDirectory, "backup.json"),
-  adapter: { disableLED: false },
-  acceptJoiningDeviceHandler: async () => await Promise.resolve(true),
-});
+const controller = new Controller(controllerOptions(config, identity, paths));
 
 const shutdown = async (): Promise<void> => {
   try {

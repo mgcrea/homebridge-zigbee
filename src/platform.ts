@@ -15,12 +15,7 @@ import { PairingSwitch } from "#accessories/pairing-switch";
 import { ConfigError, overrideFor, parseConfig, type ZigbeeConfig } from "#config";
 import { describeEndpoint, type DeviceView } from "#model/device";
 import { StateStore } from "#model/state";
-import {
-  assertNetworkIntact,
-  ControllerSupervisor,
-  NetworkResetError,
-  resolvePaths,
-} from "#zigbee/controller";
+import { ControllerSupervisor, NetworkResetError, resolvePaths } from "#zigbee/controller";
 import { installHerdsmanLogger } from "#zigbee/logger";
 import { configureReporting, refresh } from "#zigbee/reporting";
 import { PLATFORM_NAME, PLUGIN_NAME } from "#settings";
@@ -97,11 +92,17 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
       return;
     }
 
+    // Homebridge swallows nothing: an unhandled rejection out of either of
+    // these takes the whole bridge down, and every other plugin with it.
     this.api.on("didFinishLaunching", () => {
-      void this.#start();
+      void this.#start().catch((error: unknown) => {
+        this.log.error(`Zigbee platform could not start: ${describe(error)}`);
+      });
     });
     this.api.on("shutdown", () => {
-      void this.#stop();
+      void this.#stop().catch((error: unknown) => {
+        this.log.error(`Zigbee platform did not shut down cleanly: ${describe(error)}`);
+      });
     });
   }
 
@@ -139,15 +140,10 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
     installHerdsmanLogger(this.log, config.debug);
 
     const paths = resolvePaths(this.api.user.persistPath());
-    this.#supervisor = new ControllerSupervisor(
-      config,
-      paths,
-      this.log,
-      async (controller, result) => {
-        this.#controller = controller;
-        await this.#onControllerReady(controller, result);
-      },
-    );
+    this.#supervisor = new ControllerSupervisor(config, paths, this.log, async (controller) => {
+      this.#controller = controller;
+      await this.#onControllerReady(controller);
+    });
 
     try {
       await this.#supervisor.start();
@@ -162,13 +158,7 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
     }
   }
 
-  async #onControllerReady(
-    controller: Controller,
-    result: "resumed" | "reset" | "restored",
-  ): Promise<void> {
-    const known = [...controller.getDevicesIterator((device) => device.type !== "Coordinator")];
-    assertNetworkIntact({ controller, result }, this.config, known.length);
-
+  async #onControllerReady(controller: Controller): Promise<void> {
     controller.on("message", (payload) => {
       this.#onMessage(payload);
     });
@@ -192,7 +182,9 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
     controller.on("deviceAnnounce", ({ device }) => {
       // A device that just re-announced has usually been power-cycled, and Hue
       // bulbs lose their reporting configuration when that happens.
-      void this.#rearm(device);
+      void this.#rearm(device).catch((error: unknown) => {
+        this.log.warn(`Could not re-arm ${device.ieeeAddr}: ${describe(error)}`);
+      });
     });
     controller.on("permitJoinChanged", ({ permitted }) => {
       this.#pairing?.setOpen(permitted);
@@ -383,7 +375,9 @@ export class ZigbeePlatform implements DynamicPlatformPlugin {
     if (this.#refreshTimer) return;
 
     const timer = setInterval(() => {
-      void this.#refreshAll();
+      void this.#refreshAll().catch((error: unknown) => {
+        this.log.warn(`Refresh cycle failed: ${describe(error)}`);
+      });
     }, this.config.refreshInterval * 1_000);
     timer.unref?.();
     this.#refreshTimer = timer;

@@ -32,9 +32,7 @@ const DEFAULT_PERMIT_JOIN_S = 120;
 /** 802.15.4 channels available in the 2.4GHz band. */
 const MIN_CHANNEL = 11;
 const MAX_CHANNEL = 26;
-const DEFAULT_CHANNEL = 15;
-
-const DEFAULT_BAUD_RATE = 460_800;
+export const DEFAULT_CHANNEL = 15;
 
 /**
  * The adapters zigbee-herdsman ships. Validated here so a typo produces a
@@ -80,8 +78,16 @@ export type ZigbeeConfig = {
   name: string;
   port: string;
   adapter: AdapterTypes.Adapter;
-  baudRate: number;
-  rtscts: boolean;
+  /**
+   * Left undefined unless set, so herdsman's per-adapter detection decides.
+   *
+   * `Adapter.create` fills both of these in from the detected stick when they
+   * are absent — 38400 for a ConBee, 115200 for a Z-Stack, 460800 for a ZBT-2.
+   * Defaulting them here to what a ZBT-2 wants silently broke every other
+   * adapter the plugin claims to support.
+   */
+  baudRate: number | undefined;
+  rtscts: boolean | undefined;
   channel: number;
   adaptiveLighting: boolean;
   exposePairingSwitch: boolean;
@@ -125,8 +131,8 @@ export const parseConfig = (raw: PlatformConfig): ZigbeeConfig => {
     name: config.name?.trim() || "Zigbee",
     port,
     adapter: config.adapter ?? "zoh",
-    baudRate: config.baudRate ?? DEFAULT_BAUD_RATE,
-    rtscts: config.rtscts ?? true,
+    baudRate: config.baudRate,
+    rtscts: config.rtscts,
     channel: clamped(config.channel, MIN_CHANNEL, MAX_CHANNEL, DEFAULT_CHANNEL),
     adaptiveLighting: config.adaptiveLighting ?? true,
     exposePairingSwitch: config.exposePairingSwitch ?? true,

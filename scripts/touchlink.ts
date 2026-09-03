@@ -17,7 +17,8 @@
 import { resolve } from "node:path";
 import { Controller } from "zigbee-herdsman";
 
-import { parseConfig } from "#config";
+import { normalizeIeee, parseConfig } from "#config";
+import { controllerOptions, type ControllerPaths } from "#zigbee/controller";
 import { loadOrCreateIdentity } from "#zigbee/identity";
 
 const port = process.env["ZIGBEE_PORT"];
@@ -32,32 +33,20 @@ const config = parseConfig({
   platform: "Zigbee",
   port,
   adapter: process.env["ZIGBEE_ADAPTER"] ?? "ember",
+  // 25, not the plugin's default of 15. Touchlink needs InterPAN, which only
+  // `ember` implements, so this script is for a stick running EmberZNet — and
+  // the network those coordinators form here sits on 25. Override it with
+  // ZIGBEE_CHANNEL if yours does not.
   channel: Number(process.env["ZIGBEE_CHANNEL"] ?? 25),
 });
 
-const stateDirectory = resolve(process.env["ZIGBEE_STATE_DIR"] ?? ".zigbee");
+const paths: ControllerPaths = {
+  stateDirectory: resolve(process.env["ZIGBEE_STATE_DIR"] ?? ".zigbee"),
+};
+const { stateDirectory } = paths;
 const identity = loadOrCreateIdentity(resolve(stateDirectory, "identity.json"));
 
-const controller = new Controller({
-  network: {
-    panID: identity.panId,
-    extendedPanID: identity.extendedPanId,
-    networkKey: identity.networkKey,
-    channelList: [config.channel],
-    networkKeyDistribute: false,
-  },
-  serialPort: {
-    path: config.port,
-    adapter: config.adapter,
-    baudRate: config.baudRate,
-    rtscts: config.rtscts,
-  },
-  databasePath: resolve(stateDirectory, "devices.db"),
-  databaseBackupPath: resolve(stateDirectory, "devices.db.backup"),
-  backupPath: resolve(stateDirectory, "backup.json"),
-  adapter: { disableLED: false, concurrent: 1 },
-  acceptJoiningDeviceHandler: async () => await Promise.resolve(true),
-});
+const controller = new Controller(controllerOptions(config, identity, paths));
 
 controller.on("deviceJoined", ({ device }) => {
   console.log(`joined:     ${device.ieeeAddr}`);
@@ -91,10 +80,9 @@ if (!target) {
   process.exit(0);
 }
 
+const wanted = target === "--first" ? undefined : normalizeIeee(target);
 const chosen =
-  target === "--first"
-    ? found[0]
-    : found.find((d) => d.ieeeAddr.toLowerCase() === target.toLowerCase());
+  wanted === undefined ? found[0] : found.find((d) => normalizeIeee(d.ieeeAddr) === wanted);
 
 if (!chosen) {
   console.error(`\n${target} did not answer the scan.`);

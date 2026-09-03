@@ -12,11 +12,20 @@ describe("parseConfig", () => {
     expect(() => parseConfig({ platform: "Zigbee" } as PlatformConfig)).toThrow(/serial\/by-id/);
   });
 
-  it("defaults to the zoh adapter at the ZBT-2's line settings", () => {
+  it("defaults to the zoh adapter and leaves the line settings to herdsman", () => {
+    // Defaulting these to a ZBT-2's 460800/rtscts defeated herdsman's own
+    // per-adapter detection, which knows a ConBee wants 38400 and a Z-Stack
+    // stick 115200 — so those adapters simply failed to open.
     const config = parseConfig(base());
     expect(config.adapter).toBe("zoh");
-    expect(config.baudRate).toBe(460_800);
-    expect(config.rtscts).toBe(true);
+    expect(config.baudRate).toBeUndefined();
+    expect(config.rtscts).toBeUndefined();
+  });
+
+  it("still passes line settings through when they are configured", () => {
+    const config = parseConfig(base({ baudRate: 115_200, rtscts: false }));
+    expect(config.baudRate).toBe(115_200);
+    expect(config.rtscts).toBe(false);
   });
 
   it("rejects an adapter zigbee-herdsman does not have", () => {
